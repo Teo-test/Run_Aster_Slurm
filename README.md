@@ -234,27 +234,6 @@ scancel <JOB_ID>        # annuler (rapatriement automatique)
 sview                   # intarface graphique de l'état du job
 ```
 
----
-
-## Test fourni
-
-Un cas test est disponible dans `test_traction/` :
-
-```bash
-# 1. Générer le maillage (dans l'environnement Python de Code_Aster)
-cd test_traction
-python gen_mesh.py          # → test_traction.med
-
-# 2. Lancer le calcul
-cd ..
-bash run_aster.sh test_traction/
-```
-
-Cas : cube 10×10×10 mm, acier (E = 210 000 MPa, ν = 0.3), traction 10 MPa.
-Résultat attendu : Ux_max ≈ 4.76×10⁻⁴ mm.
-
----
-
 ## Auteur
 
 Téo LEROY — v5.0

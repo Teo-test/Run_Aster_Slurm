@@ -17,8 +17,8 @@
 #      À la fin (ou en cas de scancel/timeout), un trap rapatrie
 #      les résultats vers le dossier d'étude d'origine.
 #
-#  Auteur   : Téo LEROY 
-#  Version  : 5.0
+#  Auteur   : Téo LEROY
+#  Version  : 6.0
 #===============================================================================
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -45,7 +45,7 @@ DEFAULT_TIME="05:00:00"
 # ── Préréglages de ressources (-P court | -P moyen | -P long) ────────────────
 PRESET_COURT_PARTITION="court"  ; PRESET_COURT_NTASKS=1 ; PRESET_COURT_MEM="2G"  ; PRESET_COURT_TIME="05:00:00"
 PRESET_MOYEN_PARTITION="moyen"  ; PRESET_MOYEN_NTASKS=1 ; PRESET_MOYEN_MEM="8G"  ; PRESET_MOYEN_TIME="03-00:00:00"
-PRESET_LONG_PARTITION="long"   ; PRESET_LONG_NTASKS=1  ; PRESET_LONG_MEM="32G"  ; PRESET_LONG_TIME="30-00:00:00"
+PRESET_LONG_PARTITION="long"    ; PRESET_LONG_NTASKS=1  ; PRESET_LONG_MEM="32G"  ; PRESET_LONG_TIME="30-00:00:00"
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  AFFICHAGE (utilisé dans les deux phases)
@@ -67,8 +67,8 @@ sep()     { echo ""; echo "═════════════════�
 # ══════════════════════════════════════════════════════════════════════════════
 usage() {
     cat <<EOF
-USAGE$
-  sbatch run_aster_slurm.sh [OPTIONS] [DOSSIER_ETUDE]
+USAGE
+  bash run_aster.sh [OPTIONS] [DOSSIER_ETUDE]
 
   Lance un calcul Code_Aster via Slurm.
   Les fichiers sont copiés dans ${SCRATCH_BASE}/\$USER/ avant soumission.
@@ -102,26 +102,30 @@ RESSOURCES SLURM
 
 PRÉRÉGLAGES
   -P, --preset NOM     Préréglage de ressources (court, moyen, long)
-                         court : ${PRESET_COURT_NTASKS} tâches, ${PRESET_COURT_MEM}, ${PRESET_COURT_TIME}
-                         moyen : ${PRESET_MOYEN_NTASKS} tâches, ${PRESET_MOYEN_MEM}, ${PRESET_MOYEN_TIME}
-                         long  : ${PRESET_LONG_NTASKS} tâches, ${PRESET_LONG_MEM}, ${PRESET_LONG_TIME}
+                         court : ${PRESET_COURT_NTASKS} tâche(s), ${PRESET_COURT_MEM}, ${PRESET_COURT_TIME}
+                         moyen : ${PRESET_MOYEN_NTASKS} tâche(s), ${PRESET_MOYEN_MEM}, ${PRESET_MOYEN_TIME}
+                         long  : ${PRESET_LONG_NTASKS} tâche(s), ${PRESET_LONG_MEM}, ${PRESET_LONG_TIME}
                        Les options passées après -P surchargent le préréglage.
 
 OPTIONS
   -q, --quiet          Sortie minimale (juste le job ID)
+      --clean          Supprimer le scratch après rapatriement des résultats
+      --debug          Activer le mode debug bash (set -x) en phase d'exécution
   -h, --help           Afficher cette aide
 
 EXEMPLES
-  bash run_aster_slurm.sh                              # Étude dans le dossier courant
-  bash run_aster_slurm.sh ~/calculs/poutre/            # Spécifier le dossier
-  bash run_aster_slurm.sh -P court                     # Préréglage court  (2 h)
-  bash run_aster_slurm.sh -P moyen                     # Préréglage moyen  (24 h)
-  bash run_aster_slurm.sh -P long                      # Préréglage long   (72 h)
-  bash run_aster_slurm.sh -P moyen -t 8                # Moyen mais 8 tâches MPI
-  bash run_aster_slurm.sh -n 2 -t 8 -m 8G             # Personnalisé
-  bash run_aster_slurm.sh -p debug -T 01:00:00         # Partition debug, 1h max
-  bash run_aster_slurm.sh -C mon_calcul.comm -M maillage.med
-  bash run_aster_slurm.sh -P moyen --results "rmed:81,csv:38"
+  bash run_aster.sh                              # Étude dans le dossier courant
+  bash run_aster.sh ~/calculs/poutre/            # Spécifier le dossier
+  bash run_aster.sh -P court                     # Préréglage court
+  bash run_aster.sh -P moyen                     # Préréglage moyen
+  bash run_aster.sh -P long                      # Préréglage long
+  bash run_aster.sh -P moyen -t 8                # Moyen mais 8 tâches MPI
+  bash run_aster.sh -n 2 -t 8 -m 8G             # Personnalisé
+  bash run_aster.sh -p debug -T 01:00:00         # Partition debug, 1h max
+  bash run_aster.sh -C mon_calcul.comm -M maillage.med
+  bash run_aster.sh -P moyen --results "rmed:81,csv:38"
+  bash run_aster.sh -P long --clean              # Supprimer scratch en fin de job
+  bash run_aster.sh --debug -P court             # Mode debug verbose
 EOF
     exit 0
 }
@@ -139,8 +143,26 @@ EOF
 
 if [ "${__ASTER_PHASE:-}" = "RUN" ]; then
 
+    # ── Sécurité Bash en phase d'exécution ────────────────────────────────────
+    set -euo pipefail
+
+    # ── Mode debug : active la trace bash si demandé ──────────────────────────
+    [ "${__ASTER_DEBUG:-0}" = "1" ] && set -x
+
     # ── Variable pour éviter un double rapatriement ───────────────────────────
     __RAPATRIE_DONE=0
+
+    # ── Fonction utilitaire : rapatrier un fichier via rsync ─────────────────
+    #  Usage : _rsync_result SRC DEST_DIR COUNTER_VAR
+    _rsync_result() {
+        local src="$1" dest="$2"
+        if rsync -av "$src" "$dest/" > >(while read -r l; do log "$l"; done) 2>&1; then
+            return 0
+        else
+            log "⚠ Échec rsync : $src → $dest"
+            return 1
+        fi
+    }
 
     # ── Trap : rapatrier les résultats même en cas de scancel / timeout ───────
     #
@@ -157,48 +179,62 @@ if [ "${__ASTER_PHASE:-}" = "RUN" ]; then
         __RAPATRIE_DONE=1
 
         sep "RAPATRIEMENT DES RÉSULTATS"
-        local dest="$__ASTER_STUDY_DIR"
+
+        # Sous-dossier unique par job pour éviter les collisions de fichiers
+        local dest="${__ASTER_STUDY_DIR}/run_${SLURM_JOB_ID}"
         local n=0
 
-        # Vérifier que le dossier destination (work) est accessible
-        if [ ! -d "$dest" ]; then
-            log "⚠  Dossier destination inaccessible : $dest"
-            log "   Tentative de création..."
-            mkdir -p "$dest" 2>/dev/null || {
-                log "⚠  Impossible de créer $dest — résultats restent dans le scratch"
-                log "   Scratch : $__ASTER_SCRATCH_DIR"
-                return
-            }
+        # Créer le dossier de destination dédié à ce job
+        if ! mkdir -p "$dest" 2>/dev/null; then
+            log "⚠ Impossible de créer $dest — résultats restent dans le scratch"
+            log "  Scratch : $__ASTER_SCRATCH_DIR"
+            return
         fi
+        log "Destination : $dest"
 
         # Rapatrier TOUS les fichiers de résultat par extension
-        # On exclut les fichiers d'entrée (.comm, .export) et le dossier logs
+        # nullglob : évite d'itérer sur un pattern littéral si aucun fichier ne correspond
+        shopt -s nullglob
         for ext in mess resu med csv table dat pos rmed txt vtu vtk py; do
             for f in "${__ASTER_SCRATCH_DIR}"/*."${ext}"; do
                 if [ -f "$f" ] && [ -s "$f" ]; then
-                    cp -v "$f" "$dest/" 2>&1 | while read -r line; do log "$line"; done
-                    (( n++ )) || true
+                    _rsync_result "$f" "$dest" && (( n++ )) || true
                 fi
             done
         done
+        shopt -u nullglob
 
         # Rapatrier REPE_OUT si présent
         if [ -d "${__ASTER_SCRATCH_DIR}/REPE_OUT" ]; then
-            cp -rv "${__ASTER_SCRATCH_DIR}/REPE_OUT" "$dest/" 2>&1 | while read -r line; do log "$line"; done
-            (( n++ )) || true
+            _rsync_result "${__ASTER_SCRATCH_DIR}/REPE_OUT" "$dest" && (( n++ )) || true
         fi
 
         if [ "$n" -eq 0 ]; then
-            log "⚠  Aucun fichier résultat trouvé dans ${__ASTER_SCRATCH_DIR}"
-            log "   Contenu du scratch :"
-            ls -la "${__ASTER_SCRATCH_DIR}/" 2>/dev/null | while read -r line; do log "   $line"; done
+            log "⚠ Aucun fichier résultat trouvé dans ${__ASTER_SCRATCH_DIR}"
+            log "  Contenu du scratch :"
+            ls -la "${__ASTER_SCRATCH_DIR}/" 2>/dev/null | while IFS= read -r l; do log "   $l"; done
         else
-            log "✓  $n fichier(s) rapatrié(s) vers $dest"
+            log "✓ $n fichier(s) rapatrié(s) vers $dest"
         fi
 
         log ""
         log "Résultats dans : $dest"
-        ls -lh "$dest"/*.{mess,resu,med,csv,table,dat,pos,rmed,txt,vtu,vtk} 2>/dev/null | while read -r line; do log "  $line"; done
+        shopt -s nullglob
+        for f in "$dest"/*.{mess,resu,med,csv,table,dat,pos,rmed,txt,vtu,vtk}; do
+            log "  $(ls -lh "$f")"
+        done
+        shopt -u nullglob
+
+        # Nettoyage du scratch si --clean a été demandé
+        if [ "${__ASTER_CLEAN:-0}" = "1" ]; then
+            log ""
+            log "Nettoyage du scratch : $__ASTER_SCRATCH_DIR"
+            if rm -rf "$__ASTER_SCRATCH_DIR"; then
+                log "✓ Scratch supprimé"
+            else
+                log "⚠ Échec suppression scratch (droits insuffisants ?)"
+            fi
+        fi
     }
 
     # Trapper SIGTERM (envoyé par scancel / timeout SLURM) ET EXIT
@@ -210,11 +246,12 @@ if [ "${__ASTER_PHASE:-}" = "RUN" ]; then
     log "Job ID         : $SLURM_JOB_ID"
     log "Étude          : $__ASTER_STUDY_NAME"
     log "Scratch        : $__ASTER_SCRATCH_DIR"
-    log "Destination    : $__ASTER_STUDY_DIR"
+    log "Destination    : ${__ASTER_STUDY_DIR}/run_${SLURM_JOB_ID}"
     log "Nœuds alloués  : $SLURM_NODELIST"
     log "Tâches MPI     : $SLURM_NTASKS"
     log "CPUs par tâche : $SLURM_CPUS_PER_TASK"
     log "Mémoire        : $__ASTER_MEM"
+    log "Clean scratch  : ${__ASTER_CLEAN:-0}"
 
     # ── Chargement de Code_Aster ──────────────────────────────────────────────
     sep "CHARGEMENT CODE_ASTER"
@@ -225,6 +262,7 @@ if [ "${__ASTER_PHASE:-}" = "RUN" ]; then
             || log "Module '${ASTER_MODULE}' non disponible."
     fi
 
+    # Recherche de l'exécutable Code_Aster dans les emplacements courants
     ASTER_EXE=""
     for candidate in \
         "${ASTER_ROOT}/bin/run_aster" \
@@ -236,55 +274,79 @@ if [ "${__ASTER_PHASE:-}" = "RUN" ]; then
     done
 
     if [ -z "$ASTER_EXE" ]; then
-        log "⚠  Code_Aster introuvable."
-        log "   → Définir ASTER_ROOT=/chemin/code_aster avant de relancer."
-        log "   → Ou créer un module Lmod (ASTER_MODULE)."
+        err "Code_Aster introuvable."
+        err "  → Définir ASTER_ROOT=/chemin/code_aster avant de relancer."
+        err "  → Ou charger un module Lmod (ASTER_MODULE)."
         exit 1
     fi
     log "Exécutable : $ASTER_EXE"
+
+    # Vérification de version : détecte un binaire absent ou incompatible
+    ASTER_VERSION=$("$ASTER_EXE" --version 2>&1 | head -1) || true
+    if [ -z "$ASTER_VERSION" ]; then
+        warn "Impossible d'obtenir la version de Code_Aster (binaire incompatible ou muet ?)"
+    else
+        log "Version    : $ASTER_VERSION"
+    fi
 
     # ── Lancement du calcul ───────────────────────────────────────────────────
     sep "CALCUL EN COURS"
     log "Démarrage : $(date)"
 
+    # set -e est actif : le script s'arrête si Code_Aster échoue ;
+    # on capture le code retour manuellement pour le diagnostic.
+    ASTER_RC=0
     if [ "$SLURM_NTASKS" -gt 1 ]; then
         log "Mode parallèle MPI ($SLURM_NTASKS processus)"
-        log "Code_Aster en cours d'exécution..."
-        srun --mpi=pmi2 "$ASTER_EXE" "$__ASTER_EXPORT_FILE"
+        srun --mpi=pmi2 "$ASTER_EXE" "$__ASTER_EXPORT_FILE" || ASTER_RC=$?
     else
         log "Mode séquentiel"
-        log "Code_Aster en cours d'exécution..."
-        "$ASTER_EXE" "$__ASTER_EXPORT_FILE"
+        "$ASTER_EXE" "$__ASTER_EXPORT_FILE" || ASTER_RC=$?
     fi
-    ASTER_RC=$?
     log "Exécution terminée : $(date) — code retour : $ASTER_RC"
 
     # ── Diagnostic rapide du .mess ────────────────────────────────────────────
     sep "DIAGNOSTIC"
     MESS_PATH="${__ASTER_SCRATCH_DIR}/${__ASTER_STUDY_NAME}.mess"
+    NB_ALARM=0; NB_FATAL=0; NB_EXCEP=0
     if [ -f "$MESS_PATH" ]; then
         NB_ALARM=$(grep -c "<A>" "$MESS_PATH" 2>/dev/null || true)
         NB_FATAL=$(grep -c "<F>" "$MESS_PATH" 2>/dev/null || true)
         NB_EXCEP=$(grep -c "<S>" "$MESS_PATH" 2>/dev/null || true)
-        NB_ALARM=${NB_ALARM:-0}
-        NB_FATAL=${NB_FATAL:-0}
-        NB_EXCEP=${NB_EXCEP:-0}
         log "Alarmes <A>        : $NB_ALARM"
         log "Erreurs fatales <F>: $NB_FATAL"
         log "Exceptions <S>     : $NB_EXCEP"
         if [ "$NB_FATAL" -gt 0 ]; then
             log "--- Première erreur fatale ---"
-            grep -B2 -A5 "<F>" "$MESS_PATH" | head -20
+            grep -B2 -A5 "<F>" "$MESS_PATH" | head -20 || true
             log "--- fin ---"
         fi
+        if [ "$ASTER_RC" -ne 0 ] && [ "$NB_FATAL" -eq 0 ]; then
+            log "⚠ Code_Aster a échoué (rc=$ASTER_RC) sans erreur <F> visible dans le .mess"
+            log "  → Vérifier les dernières lignes du .mess :"
+            tail -20 "$MESS_PATH" | while IFS= read -r l; do log "  $l"; done
+        fi
     else
-        log "⚠  Fichier .mess non trouvé (échec au démarrage ?)"
+        log "⚠ Fichier .mess non trouvé — échec au démarrage de Code_Aster ?"
+        log "  Contenu du scratch :"
+        ls -la "${__ASTER_SCRATCH_DIR}/" 2>/dev/null | while IFS= read -r l; do log "  $l"; done
     fi
 
-    # ── Rapatriement explicite scratch → work ────────────────────────────────
+    # ── Rapatriement explicite scratch → work ─────────────────────────────────
     rapatrier
 
-    # ── Résumé final ─────────────────────────────────────────────────────────
+    # ── Résumé des ressources consommées (sacct) ──────────────────────────────
+    sep "RESSOURCES UTILISÉES"
+    if command -v sacct &>/dev/null; then
+        sacct -j "$SLURM_JOB_ID" \
+              --format=JobID,JobName%20,Elapsed,CPUTime,MaxRSS,MaxVMSize,State,ExitCode \
+              2>/dev/null | while IFS= read -r l; do log "$l"; done \
+            || log "⚠ sacct : données non disponibles"
+    else
+        log "sacct non disponible sur ce système"
+    fi
+
+    # ── Résumé final ──────────────────────────────────────────────────────────
     sep "RÉSUMÉ FINAL"
     if [ "$ASTER_RC" -eq 0 ]; then
         log "Statut    : SUCCÈS ✓"
@@ -292,12 +354,10 @@ if [ "${__ASTER_PHASE:-}" = "RUN" ]; then
         log "Statut    : ÉCHEC  ✗  (code $ASTER_RC)"
     fi
     log "Étude     : $__ASTER_STUDY_NAME"
-    log "Résultats : $__ASTER_STUDY_DIR"
+    log "Résultats : ${__ASTER_STUDY_DIR}/run_${SLURM_JOB_ID}"
     log "Scratch   : $__ASTER_SCRATCH_DIR"
     log "Fin       : $(date)"
-    if [ -n "${NB_ALARM+x}" ]; then
-        log "Alarmes <A> : $NB_ALARM  |  Fatales <F> : $NB_FATAL  |  Exceptions <S> : $NB_EXCEP"
-    fi
+    log "Alarmes <A> : $NB_ALARM  |  Fatales <F> : $NB_FATAL  |  Exceptions <S> : $NB_EXCEP"
 
     exit $ASTER_RC
 fi
@@ -313,6 +373,9 @@ fi
 # ##############################################################################
 
 set -euo pipefail
+
+# nullglob global pour éviter les erreurs sur les boucles de fichiers
+shopt -s nullglob
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PARSING DES ARGUMENTS
@@ -330,6 +393,8 @@ MEM=""
 TIME_LIMIT=""
 QUIET=false
 RESULT_UNITS=""
+OPT_CLEAN=0      # --clean : supprimer scratch après rapatriement
+OPT_DEBUG=0      # --debug : activer set -x en phase d'exécution
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -345,6 +410,8 @@ while [[ $# -gt 0 ]]; do
         -m|--mem)        MEM="$2";          shift 2 ;;
         -T|--time)       TIME_LIMIT="$2";   shift 2 ;;
         -q|--quiet)      QUIET=true;        shift ;;
+        --clean)         OPT_CLEAN=1;       shift ;;
+        --debug)         OPT_DEBUG=1;       shift ;;
         -h|--help)       usage ;;
         -*)              err "Option inconnue : $1"; echo ""; usage ;;
         *)               STUDY_DIR="$1";    shift ;;
@@ -359,21 +426,21 @@ if [ -n "$PRESET" ]; then
             : "${NTASKS:=$PRESET_COURT_NTASKS}"
             : "${MEM:=$PRESET_COURT_MEM}"
             : "${TIME_LIMIT:=$PRESET_COURT_TIME}"
-            $QUIET || info "Préréglage : court  (${PRESET_COURT_NTASKS} tâches, ${PRESET_COURT_MEM}, ${PRESET_COURT_TIME})"
+            $QUIET || info "Préréglage : court  (${PRESET_COURT_NTASKS} tâche(s), ${PRESET_COURT_MEM}, ${PRESET_COURT_TIME})"
             ;;
         moyen|medium)
             : "${PARTITION:=$PRESET_MOYEN_PARTITION}"
             : "${NTASKS:=$PRESET_MOYEN_NTASKS}"
             : "${MEM:=$PRESET_MOYEN_MEM}"
             : "${TIME_LIMIT:=$PRESET_MOYEN_TIME}"
-            $QUIET || info "Préréglage : moyen  (${PRESET_MOYEN_NTASKS} tâches, ${PRESET_MOYEN_MEM}, ${PRESET_MOYEN_TIME})"
+            $QUIET || info "Préréglage : moyen  (${PRESET_MOYEN_NTASKS} tâche(s), ${PRESET_MOYEN_MEM}, ${PRESET_MOYEN_TIME})"
             ;;
         long)
             : "${PARTITION:=$PRESET_LONG_PARTITION}"
             : "${NTASKS:=$PRESET_LONG_NTASKS}"
             : "${MEM:=$PRESET_LONG_MEM}"
             : "${TIME_LIMIT:=$PRESET_LONG_TIME}"
-            $QUIET || info "Préréglage : long   (${PRESET_LONG_NTASKS} tâches, ${PRESET_LONG_MEM}, ${PRESET_LONG_TIME})"
+            $QUIET || info "Préréglage : long   (${PRESET_LONG_NTASKS} tâche(s), ${PRESET_LONG_MEM}, ${PRESET_LONG_TIME})"
             ;;
         *) err "Préréglage inconnu : '$PRESET'  (valeurs : court, moyen, long)"; exit 1 ;;
     esac
@@ -455,28 +522,56 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 SCRATCH_DIR="${SCRATCH_BASE}/${USER}/${STUDY_NAME}_${TIMESTAMP}"
 
 $QUIET || info "Création : $SCRATCH_DIR"
-mkdir -p "$SCRATCH_DIR"
+mkdir -p "$SCRATCH_DIR" || { err "Impossible de créer le dossier scratch : $SCRATCH_DIR"; exit 1; }
 
-# ── Copie des fichiers ───────────────────────────────────────────────────────
-cp "$COMM_FILE" "$SCRATCH_DIR/"
-$QUIET || ok "Copié : $(basename "$COMM_FILE")"
+# ── Fonction de copie unifiée (rsync, plus fiable que cp sur HPC) ─────────────
+# Usage : _copy_to_scratch SRC
+_copy_to_scratch() {
+    local src="$1"
+    rsync -a "$src" "$SCRATCH_DIR/" \
+        || { err "Échec copie vers scratch : $src"; exit 1; }
+    $QUIET || ok "Copié : $(basename "$src")"
+}
 
-if [ -n "$MED_FILE" ]; then
-    cp "$MED_FILE" "$SCRATCH_DIR/"
-    $QUIET || ok "Copié : $(basename "$MED_FILE")"
-fi
+# ── Copie des fichiers principaux ─────────────────────────────────────────────
+_copy_to_scratch "$COMM_FILE"
+[ -n "$MED_FILE"  ] && _copy_to_scratch "$MED_FILE"
+[ -n "$MAIL_FILE" ] && _copy_to_scratch "$MAIL_FILE"
 
-if [ -n "$MAIL_FILE" ]; then
-    cp "$MAIL_FILE" "$SCRATCH_DIR/"
-    $QUIET || ok "Copié : $(basename "$MAIL_FILE")"
-fi
-
-# Fichiers annexes optionnels (.py, .dat, .para, .include, .mfront)
+# ── Fichiers annexes optionnels (.py, .dat, .para, .include, .mfront) ─────────
+# nullglob est actif : la boucle est silencieuse si aucun fichier ne correspond
 for ext in py dat para include mfront; do
     for f in "$STUDY_DIR/"*."$ext"; do
-        [ -f "$f" ] && cp "$f" "$SCRATCH_DIR/" && { $QUIET || ok "Copié : $(basename "$f")"; }
+        _copy_to_scratch "$f"
     done
 done
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PARSING ROBUSTE DE LA MÉMOIRE
+#  Formats acceptés : 4G, 4g, 4096M, 4096m, 4096 (entier → supposé MB)
+# ══════════════════════════════════════════════════════════════════════════════
+MEM_MB=$(echo "$MEM" | awk '
+    tolower($0) ~ /^[0-9]+g$/ { gsub(/[gGiI]/, ""); print int($0) * 1024; next }
+    tolower($0) ~ /^[0-9]+m$/ { gsub(/[mMiI]/, ""); print int($0);        next }
+    /^[0-9]+$/                { print int($0);                             next }
+    { print -1 }
+')
+
+if [ "$MEM_MB" -le 0 ] 2>/dev/null; then
+    err "Format mémoire non reconnu : '$MEM'  (attendu : 4G, 512M, ou entier en MB)"
+    exit 1
+fi
+
+# Réserver 512 MB pour le système ; plancher à 512 MB pour Code_Aster
+ASTER_MEM=$(( MEM_MB - 512 ))
+[ "$ASTER_MEM" -lt 512 ] && ASTER_MEM=512
+
+# ── Parsing robuste du temps (accepte JJ-HH:MM:SS, HH:MM:SS, MM:SS, SS) ──────
+TIME_LIMIT_SEC=$(echo "$TIME_LIMIT" | awk -F'[-:]' '
+    NF==4 {print $1*86400 + $2*3600 + $3*60 + $4; next}
+    NF==3 {print $1*3600  + $2*60   + $3;         next}
+    NF==2 {print $1*60    + $2;                   next}
+           {print $1*60}')
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  GÉNÉRATION DU FICHIER .EXPORT
@@ -486,17 +581,6 @@ $QUIET || section "Génération du fichier .export"
 COMM_BASENAME="$(basename "$COMM_FILE")"
 MED_BASENAME="$([ -n "$MED_FILE"   ] && basename "$MED_FILE"   || echo "")"
 MAIL_BASENAME="$([ -n "$MAIL_FILE"  ] && basename "$MAIL_FILE"  || echo "")"
-
-MEM_MB=$(echo "$MEM" | awk '/G$/{print $1*1024} /M$/{print $1} /^[0-9]+$/{print $1}')
-ASTER_MEM=$(( MEM_MB - 512 ))
-[ "$ASTER_MEM" -lt 512 ] && ASTER_MEM=512
-
-# Parsing robuste du temps (accepte JJ-HH:MM:SS, HH:MM:SS, MM:SS, ou SS)
-TIME_LIMIT_SEC=$(echo "$TIME_LIMIT" | awk -F'[-:]' '
-    NF==4 {print $1*86400 + $2*3600 + $3*60 + $4; next}
-    NF==3 {print $1*3600  + $2*60   + $3;         next}
-    NF==2 {print $1*60    + $2;                   next}
-           {print $1*60}')
 
 EXPORT_FILE="${SCRATCH_DIR}/${STUDY_NAME}.export"
 {
@@ -521,19 +605,8 @@ EXPORT_FILE="${SCRATCH_DIR}/${STUDY_NAME}.export"
     # ── Résultats supplémentaires (--results / -R) ──
     #
     #  Format : "type:unite,type:unite,..."
-    #
-    #  Types reconnus :
-    #    rmed  → .med    (résultat MED)
-    #    resu  → .resu   (résultat texte)
-    #    mess  → .mess   (messages)
-    #    csv   → .csv    (tableau CSV)
-    #    table → .table  (table ASTER)
-    #    dat   → .dat    (données brutes)
-    #    pos   → .pos    (post-traitement)
-    #
+    #  Types reconnus : rmed, resu, mess, csv, table, dat, pos
     #  Exemple : --results "rmed:81,csv:38"
-    #    → dans le .comm : IMPR_RESU(UNITE=81, ...)
-    #                       IMPR_TABLE(UNITE=38, ...)
     #
     if [ -n "$RESULT_UNITS" ]; then
         IFS=',' read -ra RU_LIST <<< "$RESULT_UNITS"
@@ -558,7 +631,7 @@ EXPORT_FILE="${SCRATCH_DIR}/${STUDY_NAME}.export"
     # ── Répertoire de sortie REPE_OUT ──
     echo "R ${SCRATCH_DIR}/REPE_OUT R 0"
 
-} > "$EXPORT_FILE"
+} > "$EXPORT_FILE" || { err "Échec écriture du fichier .export : $EXPORT_FILE"; exit 1; }
 
 if ! $QUIET; then
     ok "Export : $EXPORT_FILE"
@@ -574,10 +647,12 @@ if ! $QUIET; then
     info "Nœuds      : $NODES"
     info "Tâches MPI : $NTASKS"
     info "CPUs/tâche : $CPUS"
-    info "Mémoire    : $MEM"
+    info "Mémoire    : $MEM  (${ASTER_MEM} MB alloués à Code_Aster)"
     info "Durée max  : $TIME_LIMIT"
     info "Scratch    : $SCRATCH_DIR"
-    [ -n "$RESULT_UNITS" ] && info "Résultats+ : $RESULT_UNITS"
+    [ "$OPT_CLEAN" = "1" ] && info "Clean      : scratch supprimé après rapatriement"
+    [ "$OPT_DEBUG" = "1" ] && info "Debug      : set -x actif en phase d'exécution"
+    [ -n "$RESULT_UNITS"  ] && info "Résultats+ : $RESULT_UNITS"
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -614,11 +689,11 @@ JOB_ID=$(sbatch --parsable \
     --time="${TIME_LIMIT}" \
     --output="${SLURM_LOG_OUT}" \
     --error="${SLURM_LOG_ERR}" \
-    --export="ALL,__ASTER_PHASE=RUN,__ASTER_STUDY_DIR=${STUDY_DIR},__ASTER_STUDY_NAME=${STUDY_NAME},__ASTER_SCRATCH_DIR=${SCRATCH_DIR},__ASTER_EXPORT_FILE=${EXPORT_FILE},__ASTER_MEM=${MEM}" \
-    "$SELF_SCRIPT")
+    --export="ALL,__ASTER_PHASE=RUN,__ASTER_STUDY_DIR=${STUDY_DIR},__ASTER_STUDY_NAME=${STUDY_NAME},__ASTER_SCRATCH_DIR=${SCRATCH_DIR},__ASTER_EXPORT_FILE=${EXPORT_FILE},__ASTER_MEM=${MEM},__ASTER_CLEAN=${OPT_CLEAN},__ASTER_DEBUG=${OPT_DEBUG}" \
+    "$SELF_SCRIPT") || { err "Échec de la soumission Slurm (sbatch a retourné une erreur)."; exit 1; }
 
 if [ -z "$JOB_ID" ]; then
-    err "Échec de la soumission Slurm."
+    err "Échec de la soumission Slurm (job ID vide)."
     exit 1
 fi
 
@@ -636,6 +711,6 @@ else
     echo -e "  tail -f ${ACTUAL_LOG_OUT}          # logs temps réel"
     echo -e "  scancel ${JOB_ID}                                      # annuler"
     echo -e "  ls ${SCRATCH_DIR}/                                    # scratch"
-    echo -e "  ls ${STUDY_DIR}/                                      # résultats rapatriés"
+    echo -e "  ls ${STUDY_DIR}/run_${JOB_ID}/                        # résultats rapatriés"
     echo ""
 fi

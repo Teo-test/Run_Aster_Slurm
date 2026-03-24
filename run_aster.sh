@@ -1,13 +1,13 @@
 #!/bin/bash
 #===============================================================================
-#  run_aster_slurm — Calcul Code_Aster via sbatch (fichier unique)
+#  run_aster — Calcul Code_Aster via sbatch (fichier unique)
 #===============================================================================
 #
-#  Usage :  sbatch run_aster_slurm.sh [OPTIONS] [DOSSIER_ETUDE]
+#  Usage :  bash run_aster.sh [OPTIONS] [DOSSIER_ETUDE]
 #
 #  Le script fonctionne en DEUX PHASES dans un seul fichier :
 #
-#    PHASE 1 (nœud login) : sbatch lance ce script sans directives #SBATCH.
+#    PHASE 1 (nœud login) : bash lance ce script sans directives #SBATCH.
 #      Il détecte qu'on est en phase de préparation (__ASTER_PHASE non défini),
 #      prépare le scratch, copie les fichiers, génère le .export, puis se
 #      RE-SOUMET LUI-MÊME avec les bons paramètres via sbatch --partition=...

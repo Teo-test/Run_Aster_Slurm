@@ -1,0 +1,241 @@
+# run_aster.sh
+
+Script Bash pour lancer des calculs **Code_Aster** sur un cluster **Slurm**, depuis le nœud login jusqu'au nœud de calcul, en un seul fichier.
+
+---
+
+## Fonctionnement en deux phases
+
+Le script utilise une architecture en deux phases contenues dans le **même fichier** :
+
+```
+Nœud login                          Nœud de calcul
+──────────────────────────────────  ──────────────────────────────────
+bash run_aster.sh mon_etude/        sbatch re-soumet CE MÊME script
+  │                                   avec __ASTER_PHASE=RUN
+  ├─ Détecte .comm / .med / .mail
+  ├─ Crée le dossier scratch
+  ├─ Copie les fichiers
+  ├─ Génère le .export                ├─ Charge Code_Aster (Lmod)
+  └─ sbatch → ───────────────────►   ├─ Lance le calcul (séquentiel ou MPI)
+                                      ├─ Diagnostic du .mess
+                                      ├─ Rapatrie scratch → work
+                                      └─ Résumé final
+```
+
+**Phase 1** (nœud login) : préparation et soumission.
+**Phase 2** (nœud de calcul) : exécution, détectée par la variable `__ASTER_PHASE=RUN` transmise via `sbatch --export`.
+
+---
+
+## Prérequis
+
+- Slurm (`sbatch`, `squeue`, `scancel`)
+- Code_Aster installé sous `ASTER_ROOT` ou accessible via un module Lmod
+- Un répertoire scratch partagé entre nœud login et nœuds de calcul
+
+---
+
+## Configuration
+
+En tête du script, trois variables à adapter à l'installation :
+
+```bash
+ASTER_ROOT="${ASTER_ROOT:-/opt/code_aster}"   # chemin vers Code_Aster
+ASTER_MODULE="${ASTER_MODULE:-code_aster}"    # module Lmod (vide si pas de module)
+SCRATCH_BASE="${SCRATCH_BASE:-/scratch}"      # scratch partagé login ↔ calcul
+```
+
+Elles peuvent aussi être surchargées par variable d'environnement :
+
+```bash
+export ASTER_ROOT=/logiciels/code_aster/17.1
+bash run_aster.sh mon_etude/
+```
+
+---
+
+## Usage
+
+```bash
+bash run_aster.sh [OPTIONS] [DOSSIER_ETUDE]
+```
+
+`DOSSIER_ETUDE` est le dossier contenant `.comm` et `.med` / `.mail`.
+Par défaut : répertoire courant.
+
+### Fichiers d'entrée
+
+| Option | Description |
+|--------|-------------|
+| `-C, --comm FILE` | Fichier de commandes `.comm` (auto-détecté si absent) |
+| `-M, --med FILE`  | Maillage au format MED (auto-détecté si absent) |
+| `-A, --mail FILE` | Maillage au format ASTER natif (auto-détecté si absent) |
+
+Si plusieurs fichiers `.comm` ou `.med` sont trouvés dans le dossier, le premier par ordre alphabétique est sélectionné (avertissement affiché).
+
+### Ressources Slurm
+
+| Option | Défaut | Description |
+|--------|--------|-------------|
+| `-p, --partition NOM` | `court`    | Partition Slurm |
+| `-n, --nodes N`       | `1`        | Nombre de nœuds |
+| `-t, --ntasks N`      | `4`        | Tâches MPI |
+| `-c, --cpus N`        | `1`        | CPUs par tâche |
+| `-m, --mem MEM`       | `5G`       | Mémoire par nœud |
+| `-T, --time DUREE`    | `05:00:00` | Durée maximale |
+
+Le format de durée accepté est `JJ-HH:MM:SS`, `HH:MM:SS`, `MM:SS` ou `SS`.
+
+### Préréglages `-P`
+
+Raccourcis pour les configurations typiques :
+
+| Préréglage | Partition | Mémoire | Durée max |
+|------------|-----------|---------|-----------|
+| `court`    | court     | 2 G     | 5 h       |
+| `moyen`    | moyen     | 8 G     | 3 jours   |
+| `long`     | long      | 32 G    | 30 jours  |
+
+Les options passées **après** `-P` surchargent le préréglage :
+
+```bash
+bash run_aster.sh -P moyen -t 8   # préréglage moyen, mais 8 tâches MPI
+```
+
+### Résultats supplémentaires `-R`
+
+Déclare des fichiers de sortie additionnels (au-delà de `.mess`, `.resu`, `_resu.med`) :
+
+```
+-R "type:unite,type:unite,..."
+```
+
+Types disponibles : `rmed`, `resu`, `mess`, `csv`, `table`, `dat`, `pos`
+
+Dans le `.comm`, utiliser l'unité correspondante :
+
+```python
+IMPR_RESU(UNITE=81, ...)     # avec -R "rmed:81"
+IMPR_TABLE(UNITE=38, ...)    # avec -R "csv:38"
+```
+
+### Autres options
+
+| Option | Description |
+|--------|-------------|
+| `-q, --quiet` | Sortie minimale — affiche uniquement le job ID |
+| `-h, --help`  | Affiche l'aide |
+
+---
+
+## Exemples
+
+```bash
+# Dossier courant, ressources par défaut
+bash run_aster.sh
+
+# Dossier explicite
+bash run_aster.sh ~/calculs/poutre/
+
+# Préréglages
+bash run_aster.sh -P court mon_etude/
+bash run_aster.sh -P moyen mon_etude/
+bash run_aster.sh -P long  mon_etude/
+
+# Préréglage surchargé
+bash run_aster.sh -P moyen -t 8 -m 16G mon_etude/
+
+# Fichiers explicites
+bash run_aster.sh -C calcul.comm -M maillage.med
+
+# Résultats additionnels
+bash run_aster.sh -P moyen -R "rmed:81,csv:38" mon_etude/
+
+# Récupérer juste l'ID (pour scripts)
+JOB=$(bash run_aster.sh -q mon_etude/)
+```
+
+---
+
+## Ce que fait le script automatiquement
+
+### Phase 1 — nœud login
+
+1. Détecte les fichiers `.comm`, `.med`, `.mail` dans le dossier d'étude
+2. Crée `$SCRATCH_BASE/$USER/<etude>_<timestamp>/`
+3. Copie tous les fichiers d'entrée dans le scratch
+4. Génère le fichier `.export` (configuration Code_Aster)
+5. Soumet le job via `sbatch` en passant toutes les options en arguments
+
+### Phase 2 — nœud de calcul
+
+1. Charge Code_Aster via `module load` ou chemin direct
+2. Affiche **"Code_Aster en cours d'exécution..."**
+3. Lance le calcul (`srun --mpi=pmi2` en parallèle, ou direct en séquentiel)
+4. Affiche **"Exécution terminée"** + date + code retour
+5. Analyse le `.mess` : compte les alarmes `<A>`, erreurs fatales `<F>`, exceptions `<S>`, affiche la première erreur fatale si présente
+6. **Rapatrie** les fichiers de résultat du scratch vers le dossier d'étude
+7. Affiche le résumé final
+
+### Gestion des interruptions (scancel / timeout)
+
+Un `trap` sur `SIGTERM` et `EXIT` garantit que les résultats sont **toujours rapatriés**, même si le job est annulé (`scancel`) ou atteint sa limite de temps. Le double rapatriement est évité par un verrou interne.
+
+---
+
+## Structure des fichiers pendant l'exécution
+
+```
+$SCRATCH_BASE/$USER/<etude>_<timestamp>/   ← scratch (calcul)
+  ├─ mon_etude.comm
+  ├─ mon_etude.med
+  ├─ mon_etude.export
+  ├─ mon_etude.mess          ← messages Code_Aster
+  ├─ mon_etude.resu          ← résultats texte
+  └─ mon_etude_resu.med      ← résultats MED (ParaView)
+
+$STUDY_DIR/                               ← work (rapatrié)
+  ├─ mon_etude.comm
+  ├─ mon_etude.med
+  ├─ mon_etude.mess          ← copié depuis scratch
+  ├─ mon_etude.resu
+  ├─ mon_etude_resu.med
+  ├─ aster_<jobid>.out       ← logs Slurm (temps réel via tail -f)
+  └─ aster_<jobid>.err
+```
+
+---
+
+## Suivre un calcul en cours
+
+```bash
+squeue -j <JOB_ID>                     # état du job
+tail -f ~/calculs/mon_etude/aster_<JOB_ID>.out   # logs temps réel
+scancel <JOB_ID>                       # annuler (rapatriement automatique)
+```
+
+---
+
+## Test fourni
+
+Un cas test est disponible dans `test_traction/` :
+
+```bash
+# 1. Générer le maillage (dans l'environnement Python de Code_Aster)
+cd test_traction
+python gen_mesh.py          # → test_traction.med
+
+# 2. Lancer le calcul
+cd ..
+bash run_aster.sh test_traction/
+```
+
+Cas : cube 10×10×10 mm, acier (E = 210 000 MPa, ν = 0.3), traction 10 MPa.
+Résultat attendu : Ux_max ≈ 4.76×10⁻⁴ mm.
+
+---
+
+## Auteur
+
+Téo LEROY — v5.0

@@ -249,12 +249,15 @@ if [ "${__ASTER_PHASE:-}" = "RUN" ]; then
 
     if [ "$SLURM_NTASKS" -gt 1 ]; then
         log "Mode parallèle MPI ($SLURM_NTASKS processus)"
+        log "Code_Aster en cours d'exécution..."
         srun --mpi=pmi2 "$ASTER_EXE" "$__ASTER_EXPORT_FILE"
     else
         log "Mode séquentiel"
+        log "Code_Aster en cours d'exécution..."
         "$ASTER_EXE" "$__ASTER_EXPORT_FILE"
     fi
     ASTER_RC=$?
+    log "Exécution terminée : $(date) — code retour : $ASTER_RC"
 
     # ── Diagnostic rapide du .mess ────────────────────────────────────────────
     sep "DIAGNOSTIC"
@@ -278,7 +281,10 @@ if [ "${__ASTER_PHASE:-}" = "RUN" ]; then
         log "⚠  Fichier .mess non trouvé (échec au démarrage ?)"
     fi
 
-    # ── Résumé (le trap EXIT fera le rapatriement) ────────────────────────────
+    # ── Rapatriement explicite scratch → work ────────────────────────────────
+    rapatrier
+
+    # ── Résumé final ─────────────────────────────────────────────────────────
     sep "RÉSUMÉ FINAL"
     if [ "$ASTER_RC" -eq 0 ]; then
         log "Statut    : SUCCÈS ✓"
@@ -289,6 +295,9 @@ if [ "${__ASTER_PHASE:-}" = "RUN" ]; then
     log "Résultats : $__ASTER_STUDY_DIR"
     log "Scratch   : $__ASTER_SCRATCH_DIR"
     log "Fin       : $(date)"
+    if [ -n "${NB_ALARM+x}" ]; then
+        log "Alarmes <A> : $NB_ALARM  |  Fatales <F> : $NB_FATAL  |  Exceptions <S> : $NB_EXCEP"
+    fi
 
     exit $ASTER_RC
 fi

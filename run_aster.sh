@@ -463,7 +463,14 @@ _copy_to_scratch() {
 _copy_to_scratch "$COMM_FILE"
 [ -n "$MED_FILE"  ] && _copy_to_scratch "$MED_FILE"
 [ -n "$MAIL_FILE" ] && _copy_to_scratch "$MAIL_FILE"
-[ -n "$BASE_FILE" ] && _copy_to_scratch "$BASE_FILE"
+
+# La base doit etre renommee en glob.1 dans le scratch :
+# Code_Aster (run_aster) cherche toujours ./glob.1 en interne,
+# quel que soit le nom du fichier .base d'origine.
+if [ -n "$BASE_FILE" ]; then
+    rsync -a "$BASE_FILE" "$SCRATCH_DIR/glob.1" || { err "Echec copie base : $BASE_FILE"; exit 1; }
+    $QUIET || ok "Copie : $(basename "$BASE_FILE") -> glob.1"
+fi
 
 # Fichiers annexes
 shopt -s nullglob
@@ -501,7 +508,6 @@ $QUIET || section "Generation du fichier .export"
 COMM_BASENAME="$(basename "$COMM_FILE")"
 MED_BASENAME="$([ -n "$MED_FILE"  ] && basename "$MED_FILE"  || echo "")"
 MAIL_BASENAME="$([ -n "$MAIL_FILE" ] && basename "$MAIL_FILE" || echo "")"
-BASE_BASENAME="$([ -n "$BASE_FILE" ] && basename "$BASE_FILE" || echo "")"
 
 EXPORT_FILE="${SCRATCH_DIR}/${STUDY_NAME}.export"
 {
@@ -519,7 +525,8 @@ EXPORT_FILE="${SCRATCH_DIR}/${STUDY_NAME}.export"
     [ -n "$MAIL_BASENAME" ] && echo "F mail ${SCRATCH_DIR}/${MAIL_BASENAME}           D 20"
 
     # Base en ENTREE pour POURSUITE (-B)
-    [ -n "$BASE_BASENAME" ] && echo "F base ${SCRATCH_DIR}/${BASE_BASENAME} D 0"
+    # Le fichier .base a ete renomme en glob.1 dans le scratch
+    [ -n "$BASE_FILE" ] && echo "F base ${SCRATCH_DIR}/glob.1 D 0"
 
     # Base en SORTIE (--save-base)
     if [ "$OPT_SAVE_BASE" = "1" ]; then

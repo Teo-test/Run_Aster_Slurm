@@ -11,7 +11,7 @@
 #    PHASE 2 (noeud de calcul) : chargement Aster, calcul, rapatriement
 #
 #  Auteur   : Teo LEROY
-#  Version  : 8.1
+#  Version  : 8.2
 #===============================================================================
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -69,22 +69,20 @@ FICHIERS
 
 POURSUITE / ENCHAINEMENT
   --save-base          Sauvegarder la base de donnees Aster en sortie.
+                       Produit un fichier STUDY_NAME.base dans les resultats.
                        Indispensable si un calcul suivant utilise POURSUITE().
-                       Les fichiers base (glob.1, pick.1...) seront rapatries
-                       dans run_JOBID/ et utilisables avec -B.
 
-  -B, --base CHEMIN    Dossier contenant la base d'un calcul precedent
-                       pour POURSUITE(). Typiquement un run_JOBID ou "latest".
-                       Le dossier doit contenir glob.1 (genere par --save-base).
+  -B, --base FICHIER   Fichier .base d'un calcul precedent pour POURSUITE().
+                       Typiquement : ~/etude_thermo/latest/thermo.base
 
   Workflow couplage thermo-meca :
     1. bash run_aster.sh --save-base -P moyen ~/etude_thermo/
-    2. bash run_aster.sh -B ~/etude_thermo/latest -P moyen ~/etude_meca/
+    2. bash run_aster.sh -B ~/etude_thermo/latest/etude_thermo.base -P moyen ~/etude_meca/
 
   Enchainer 3 calculs :
     1. bash run_aster.sh --save-base ~/etape1/
-    2. bash run_aster.sh --save-base -B ~/etape1/latest ~/etape2/
-    3. bash run_aster.sh -B ~/etape2/latest ~/etape3/
+    2. bash run_aster.sh --save-base -B ~/etape1/latest/etape1.base ~/etape2/
+    3. bash run_aster.sh -B ~/etape2/latest/etape2.base ~/etape3/
 
 RESULTATS SUPPLEMENTAIRES
   -R, --results LIST   Unites additionnelles. Format : "type:unite,..."
@@ -152,22 +150,12 @@ if [ "${__ASTER_PHASE:-}" = "RUN" ]; then
 
         # Rapatrier les fichiers de resultat par extension
         shopt -s nullglob
-        for ext in mess resu med csv table dat pos rmed txt vtu vtk py; do
+        for ext in mess resu med csv table dat pos rmed txt vtu vtk py base; do
             for f in "${__ASTER_SCRATCH_DIR}"/*."${ext}"; do
                 if [ -f "$f" ] && [ -s "$f" ]; then
                     _rsync_result "$f" "$dest" && (( n++ )) || true
                 fi
             done
-        done
-        shopt -u nullglob
-
-        # Rapatrier la base (glob.*, pick.*) si elle existe
-        # Generee uniquement si --save-base a ete utilise
-        shopt -s nullglob
-        for f in "${__ASTER_SCRATCH_DIR}"/glob.* "${__ASTER_SCRATCH_DIR}"/pick.*; do
-            if [ -f "$f" ] && [ -s "$f" ]; then
-                _rsync_result "$f" "$dest" && (( n++ )) || true
-            fi
         done
         shopt -u nullglob
 
@@ -220,7 +208,7 @@ if [ "${__ASTER_PHASE:-}" = "RUN" ]; then
     log "Taches MPI     : $SLURM_NTASKS"
     log "Memoire        : $__ASTER_MEM"
     log "Save base      : ${__ASTER_SAVE_BASE:-0}"
-    log "Base poursuite : ${__ASTER_BASE_DIR:-aucune}"
+    log "Base poursuite : ${__ASTER_BASE_FILE:-aucune}"
 
     # ── Chargement de Code_Aster ──────────────────────────────────────────────
     sep "CHARGEMENT CODE_ASTER"
@@ -328,7 +316,7 @@ STUDY_DIR="."
 COMM_FILE=""
 MED_FILE=""
 MAIL_FILE=""
-BASE_DIR=""
+BASE_FILE=""
 PRESET=""
 PARTITION=""
 NODES=""
@@ -348,7 +336,7 @@ while [[ $# -gt 0 ]]; do
         -C|--comm)          COMM_FILE="$2";       shift 2 ;;
         -M|--med)           MED_FILE="$2";        shift 2 ;;
         -A|--mail)          MAIL_FILE="$2";       shift 2 ;;
-        -B|--base)          BASE_DIR="$2";        shift 2 ;;
+        -B|--base)          BASE_FILE="$2";       shift 2 ;;
         -R|--results)       RESULT_UNITS="$2";    shift 2 ;;
         -P|--preset)        PRESET="$2";          shift 2 ;;
         -p|--partition)     PARTITION="$2";       shift 2 ;;
@@ -445,17 +433,15 @@ fi
 
 [ -z "$MED_FILE" ] && [ -z "$MAIL_FILE" ] && warn "Aucun maillage detecte"
 
-# Base de poursuite
-if [ -n "$BASE_DIR" ]; then
-    BASE_DIR="$(realpath "$BASE_DIR")"
-    if [ ! -f "$BASE_DIR/glob.1" ]; then
-        err "Pas de glob.1 dans : $BASE_DIR"
+# .base (poursuite)
+if [ -n "$BASE_FILE" ]; then
+    BASE_FILE="$(realpath "$BASE_FILE")"
+    if [ ! -f "$BASE_FILE" ]; then
+        err "Fichier base introuvable : $BASE_FILE"
         err "  Avez-vous lance le calcul precedent avec --save-base ?"
-        err "  Contenu :"
-        ls -la "$BASE_DIR/" 2>/dev/null | while IFS= read -r l; do err "    $l"; done
         exit 1
     fi
-    $QUIET || ok "Base POURSUITE : $BASE_DIR"
+    $QUIET || ok "Base POURSUITE : $BASE_FILE"
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -477,16 +463,7 @@ _copy_to_scratch() {
 _copy_to_scratch "$COMM_FILE"
 [ -n "$MED_FILE"  ] && _copy_to_scratch "$MED_FILE"
 [ -n "$MAIL_FILE" ] && _copy_to_scratch "$MAIL_FILE"
-
-# Base de poursuite
-if [ -n "$BASE_DIR" ]; then
-    $QUIET || info "Copie de la base de poursuite..."
-    shopt -s nullglob
-    for f in "$BASE_DIR"/glob.* "$BASE_DIR"/pick.*; do
-        _copy_to_scratch "$f"
-    done
-    shopt -u nullglob
-fi
+[ -n "$BASE_FILE" ] && _copy_to_scratch "$BASE_FILE"
 
 # Fichiers annexes
 shopt -s nullglob
@@ -524,6 +501,7 @@ $QUIET || section "Generation du fichier .export"
 COMM_BASENAME="$(basename "$COMM_FILE")"
 MED_BASENAME="$([ -n "$MED_FILE"  ] && basename "$MED_FILE"  || echo "")"
 MAIL_BASENAME="$([ -n "$MAIL_FILE" ] && basename "$MAIL_FILE" || echo "")"
+BASE_BASENAME="$([ -n "$BASE_FILE" ] && basename "$BASE_FILE" || echo "")"
 
 EXPORT_FILE="${SCRATCH_DIR}/${STUDY_NAME}.export"
 {
@@ -541,14 +519,11 @@ EXPORT_FILE="${SCRATCH_DIR}/${STUDY_NAME}.export"
     [ -n "$MAIL_BASENAME" ] && echo "F mail ${SCRATCH_DIR}/${MAIL_BASENAME}           D 20"
 
     # Base en ENTREE pour POURSUITE (-B)
-    if [ -n "$BASE_DIR" ]; then
-        echo "F base ${SCRATCH_DIR}/glob.1 D 0"
-    fi
+    [ -n "$BASE_BASENAME" ] && echo "F base ${SCRATCH_DIR}/${BASE_BASENAME} D 0"
 
-    # Base en SORTIE pour sauvegarder (--save-base)
-    # Permet a un calcul suivant de reprendre via -B
+    # Base en SORTIE (--save-base)
     if [ "$OPT_SAVE_BASE" = "1" ]; then
-        echo "F base ${SCRATCH_DIR}/glob.1 R 0"
+        echo "F base ${SCRATCH_DIR}/${STUDY_NAME}.base R 0"
     fi
 
     # Fichiers de sortie par defaut
@@ -594,11 +569,11 @@ if ! $QUIET; then
     info "Memoire    : $MEM  (${ASTER_MEM} MB pour Code_Aster)"
     info "Duree max  : $TIME_LIMIT"
     info "Scratch    : $SCRATCH_DIR"
-    [ "$OPT_SAVE_BASE" = "1" ]    && info "Save base  : OUI (glob.*/pick.* seront rapatries)"
+    [ "$OPT_SAVE_BASE" = "1" ]    && info "Save base  : OUI (${STUDY_NAME}.base sera rapatrie)"
     [ "$OPT_KEEP_SCRATCH" = "1" ] && info "Scratch    : conserve (--keep-scratch)"
     [ "$OPT_DEBUG" = "1" ]        && info "Debug      : set -x actif"
     [ -n "$RESULT_UNITS" ]        && info "Resultats+ : $RESULT_UNITS"
-    [ -n "$BASE_DIR" ]            && info "Base       : $BASE_DIR (POURSUITE)"
+    [ -n "$BASE_FILE" ]           && info "Base       : $BASE_FILE (POURSUITE)"
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -622,7 +597,7 @@ EXPORT_VARS+=",__ASTER_MODULE=${ASTER_MODULE}"
 EXPORT_VARS+=",__ASTER_KEEP_SCRATCH=${OPT_KEEP_SCRATCH}"
 EXPORT_VARS+=",__ASTER_DEBUG=${OPT_DEBUG}"
 EXPORT_VARS+=",__ASTER_SAVE_BASE=${OPT_SAVE_BASE}"
-EXPORT_VARS+=",__ASTER_BASE_DIR=${BASE_DIR}"
+EXPORT_VARS+=",__ASTER_BASE_FILE=${BASE_FILE}"
 
 SBATCH_CMD=(
     sbatch --parsable
@@ -662,7 +637,7 @@ else
     echo -e "  scancel ${JOB_ID}"
     echo -e "  ls ${STUDY_DIR}/run_${JOB_ID}/"
     echo -e "  ls -l ${STUDY_DIR}/latest"
-    [ -n "$BASE_DIR" ]            && echo -e "  # POURSUITE depuis : ${BASE_DIR}"
-    [ "$OPT_SAVE_BASE" = "1" ]    && echo -e "  # Base sauvegardee dans run_${JOB_ID}/ (utilisable avec -B)"
+    [ -n "$BASE_FILE" ]           && echo -e "  # POURSUITE depuis : ${BASE_FILE}"
+    [ "$OPT_SAVE_BASE" = "1" ]    && echo -e "  # Base sauvegardee : run_${JOB_ID}/${STUDY_NAME}.base"
     echo ""
 fi

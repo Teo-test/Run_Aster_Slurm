@@ -12,20 +12,20 @@ Le script utilise une architecture en deux phases contenues dans le **même fich
 Nœud login                          Nœud de calcul
 ──────────────────────────────────  ──────────────────────────────────
 bash run_aster.sh mon_etude/        sbatch soumet CE MÊME script
-  │                                   avec __ASTER_PHASE=RUN
+  │                                   avec __RUN_PHASE=EXEC
   ├─ Détecte .comm / .med / .mail
   ├─ Crée le dossier scratch
   ├─ Copie les fichiers
   ├─ Génère le .export                ├─ Charge Code_Aster
-  └─ sbatch → ───────────────────►    ├─ Lance le calcul (séquentiel ou MPI)
+  └─ sbatch → ───────────────────►    ├─ Lance le calcul (run_aster gère MPI en interne)
                                       ├─ Diagnostic du .mess
-                                      ├─ Rapatrie scratch → work
+                                      ├─ Rapatrie scratch → run_JOBID/
                                       └─ Résumé final
 ```
 
 **Phase 1** (nœud login) : préparation et soumission.
 
-**Phase 2** (nœud de calcul) : exécution, détectée par la variable `__ASTER_PHASE=RUN` transmise via `sbatch --export`.
+**Phase 2** (nœud de calcul) : exécution, détectée par la variable `__RUN_PHASE=EXEC` transmise via `sbatch --export`.
 
 ---
 
@@ -75,6 +75,8 @@ Par défaut : répertoire courant.
 
 Si plusieurs fichiers `.comm` ou `.med` sont trouvés dans le dossier, le premier par ordre alphabétique est sélectionné (avertissement affiché).
 
+Les fichiers annexes (`.py`, `.dat`, `.para`, `.include`, `.mfront`) présents dans le dossier d'étude sont copiés automatiquement dans le scratch.
+
 ### Ressources Slurm
 
 | Option | Défaut | Description |
@@ -104,6 +106,25 @@ Les options passées **après** `-P` remplacent les paramètres par défaut :
 bash run_aster.sh -P moyen -t 8   # préréglage moyen, mais 8 tâches MPI
 ```
 
+### Poursuite de calcul
+
+| Option | Description |
+|--------|-------------|
+| `--save-base`         | Sauvegarde la base (glob/pick/vola) après le calcul dans `run_JOBID/base/` |
+| `-B, --base DOSSIER`  | Dossier contenant les fichiers glob/pick/vola d'un calcul précédent (pour `POURSUITE`) |
+
+Exemple de workflow :
+
+```bash
+# Calcul initial — sauvegarder la base pour une poursuite ultérieure
+bash run_aster.sh --save-base ~/thermo/
+
+# Poursuite — reprendre depuis la base sauvegardée
+bash run_aster.sh -B ~/thermo/latest/base/ ~/meca/
+```
+
+> **Note :** `-B` attend un dossier contenant directement les fichiers `glob.*`, `pick.*`, `vola.*`.
+
 ### Résultats supplémentaires `-R`
 
 Déclare des fichiers de sortie additionnels (au-delà de `.mess`, `.resu`, `_resu.med`) :
@@ -112,7 +133,7 @@ Déclare des fichiers de sortie additionnels (au-delà de `.mess`, `.resu`, `_re
 -R "type:unite,type:unite,..."
 ```
 
-#### Rappel ####
+#### Rappel des unités Code_Aster ####
 
 | Unité | Type fichier | Extension | Direction | Description |
 |:-----:|:------------|:---------:|:---------:|:------------|
@@ -142,8 +163,11 @@ IMPR_TABLE(UNITE=38, ...)    # avec -R "csv:38"
 
 | Option | Description |
 |--------|-------------|
-| `-q, --quiet` | Sortie minimale — affiche uniquement le job ID |
-| `-h, --help`  | Affiche l'aide |
+| `-q, --quiet`     | Sortie minimale — affiche uniquement le job ID |
+| `--keep-scratch`  | Conserver le dossier scratch après le calcul |
+| `--dry-run`       | Afficher la commande sbatch sans la lancer |
+| `--debug`         | Mode verbose (`set -x`) sur le nœud de calcul |
+| `-h, --help`      | Afficher l'aide |
 
 ---
 
@@ -170,8 +194,15 @@ bash run_aster.sh -C calcul.comm -M maillage.med
 # Résultats additionnels
 bash run_aster.sh -P moyen -R "rmed:81,csv:38" mon_etude/
 
+# Poursuite de calcul
+bash run_aster.sh --save-base mon_etude/
+bash run_aster.sh -B mon_etude/latest/base/ mon_etude_suite/
+
 # Récupérer juste l'ID (pour scripts)
 JOB=$(bash run_aster.sh -q mon_etude/)
+
+# Vérifier sans lancer
+bash run_aster.sh --dry-run -P moyen mon_etude/
 ```
 
 ---
@@ -181,20 +212,21 @@ JOB=$(bash run_aster.sh -q mon_etude/)
 ### Phase 1 — nœud login
 
 1. Détecte les fichiers `.comm`, `.med`, `.mail` dans le dossier d'étude
-2. Crée `$SCRATCH_BASE/$USER/<etude>_<timestamp>/`
-3. Copie tous les fichiers d'entrée dans le scratch
-4. Génère le fichier `.export` (configuration Code_Aster)
-5. Soumet le job via `sbatch` en passant toutes les options en arguments
+2. Crée `$SCRATCH_BASE/$USER/<etude>_<timestamp>_<pid>/`
+3. Copie tous les fichiers d'entrée dans le scratch (y compris fichiers annexes)
+4. Copie la base de poursuite dans `scratch/base_in/` si `-B` est fourni
+5. Génère le fichier `.export` (configuration Code_Aster)
+6. Soumet le job via `sbatch` en passant toutes les options via `--export`
 
 ### Phase 2 — nœud de calcul
 
 1. Charge Code_Aster via `module load` ou chemin direct
-2. Affiche **"Code_Aster en cours d'exécution..."**
-3. Lance le calcul (`srun --mpi=pmi2` en parallèle, ou direct en séquentiel)
-4. Affiche **"Exécution terminée"** + date + code retour
-5. Analyse le `.mess` : compte les alarmes `<A>`, erreurs fatales `<F>`, exceptions `<S>`, affiche la première erreur fatale si présente
-6. **Rapatrie** les fichiers de résultat du scratch vers le dossier d'étude
-7. Affiche le résumé final
+2. Affiche le contenu du scratch et du `.export` (vérification)
+3. Lance le calcul — `run_aster` gère MPI en interne, ne pas appeler via `srun`
+4. Analyse le `.mess` : compte les alarmes `<A>`, erreurs fatales `<F>`, exceptions `<S>`, affiche les premières erreurs si présentes
+5. **Rapatrie** les fichiers de résultat du scratch vers `$STUDY_DIR/run_$JOBID/`
+6. Crée un lien symbolique `$STUDY_DIR/latest` → `run_$JOBID/`
+7. Sauvegarde la base (glob/pick/vola) dans `run_$JOBID/base/` si `--save-base`
 
 ### Gestion des interruptions (scancel / timeout)
 
@@ -205,22 +237,30 @@ Un `trap` sur `SIGTERM` et `EXIT` garantit que les résultats sont **toujours ra
 ## Structure des fichiers pendant l'exécution
 
 ```
-$SCRATCH_BASE/$USER/<etude>_<timestamp>/   ← scratch (calcul)
+$SCRATCH_BASE/$USER/<etude>_<timestamp>_<pid>/   ← scratch (calcul)
   ├─ mon_etude.comm
   ├─ mon_etude.med
   ├─ mon_etude.export
-  ├─ mon_etude.mess          ← messages Code_Aster
-  ├─ mon_etude.resu          ← résultats texte
-  └─ mon_etude_resu.med      ← résultats MED (ParaView)
-
-$STUDY_DIR/                               ← work (rapatrié)
-  ├─ mon_etude.comm
-  ├─ mon_etude.med
-  ├─ mon_etude.mess          ← copié depuis scratch
+  ├─ mon_etude.mess
   ├─ mon_etude.resu
   ├─ mon_etude_resu.med
+  ├─ base_in/                ← copie de la base d'entrée (si -B)
+  │   ├─ glob.1
+  │   └─ ...
+  └─ REPE_OUT/               ← répertoire de sortie libre (si utilisé)
+
+$STUDY_DIR/                                      ← dossier d'étude
   ├─ aster_<jobid>.out       ← logs Slurm (temps réel via tail -f)
-  └─ aster_<jobid>.err
+  ├─ aster_<jobid>.err
+  ├─ latest -> run_<jobid>/  ← lien symbolique vers le dernier run
+  └─ run_<jobid>/            ← résultats rapatriés
+      ├─ mon_etude.mess
+      ├─ mon_etude.resu
+      ├─ mon_etude_resu.med
+      ├─ REPE_OUT/           ← si présent dans le scratch
+      └─ base/               ← base sauvegardée (si --save-base)
+          ├─ glob.1
+          └─ ...
 ```
 
 ---
@@ -228,12 +268,14 @@ $STUDY_DIR/                               ← work (rapatrié)
 ## Suivre un calcul en cours
 
 ```bash
-squeue -j <JOB_ID>       # état du job
-tail -f ~/calculs/mon_etude/aster_<JOB_ID>.out   # logs temps réel
-scancel <JOB_ID>        # annuler (rapatriement automatique)
-sview                   # intarface graphique de l'état du job
+squeue -j <JOB_ID>                              # état du job
+tail -f ~/calculs/mon_etude/aster_<JOB_ID>.out  # logs temps réel
+scancel <JOB_ID>                                # annuler (rapatriement automatique)
+ls ~/calculs/mon_etude/run_<JOB_ID>/            # résultats rapatriés
+ls ~/calculs/mon_etude/latest/                  # dernier run (lien symbolique)
+sview                                           # interface graphique de l'état du job
 ```
 
 ## Auteur
 
-Téo LEROY — v5.0
+Téo LEROY — v9.0

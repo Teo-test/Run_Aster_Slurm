@@ -252,6 +252,103 @@ ls ~/calculs/mon_etude/latest/                  # dernier run (lien symbolique)
 sview                                           # interface graphique de l'état du job
 ```
 
+---
+
+## Outils annexes
+
+### `run_aster_light.sh` — Version minimale de debug
+
+Script simplifié pour diagnostiquer des problèmes de configuration Code_Aster/Slurm. Il affiche l'environnement complet (PATH, modules, exécutable trouvé, contenu du `.export` et du scratch) avant de lancer le calcul.
+
+#### Usage
+
+```bash
+bash run_aster_light.sh [OPTIONS] DOSSIER_ETUDE
+```
+
+#### Options
+
+| Option | Description |
+|--------|-------------|
+| `-B, --base CHEMIN` | Dossier de base d'un calcul précédent pour **POURSUITE** (doit contenir `glob.*` et `pick.*`). Peut être un dossier `run_JOBID/` ou `latest/`. |
+| `-h, --help` | Afficher l'aide |
+
+#### Exemples
+
+```bash
+# Calcul simple
+bash run_aster_light.sh ~/etude_thermo/
+
+# Calcul mécanique en poursuite d'un calcul thermo
+bash run_aster_light.sh -B ~/etude_thermo/run_12345 ~/etude_meca/
+bash run_aster_light.sh -B ~/etude_thermo/latest    ~/etude_meca/
+```
+
+Les résultats (`.mess`, `.resu`, `.med`, `.csv`, `glob.*`, `pick.*`, `REPE_OUT/`) sont rapatriés dans `$STUDY_DIR/run_$JOBID/` avec un lien symbolique `latest`.
+
+---
+
+### `comparecsv.py` — Comparateur interactif de CSV
+
+Outil interactif pour charger, explorer et tracer des fichiers CSV. Détecte automatiquement le séparateur.
+
+#### Prérequis
+
+```bash
+pip install pandas matplotlib numpy
+```
+
+#### Usage
+
+```bash
+python comparecsv.py [fichier1.csv fichier2.csv ...]
+```
+
+#### Fonctionnalités
+
+- **Graphes** : ligne, scatter, barres, histogramme, boîte à moustaches, aire empilée, heatmap de corrélation
+- **Aperçu** : résumé des colonnes (numériques / texte), statistiques descriptives
+- **Multi-fichiers** : compare plusieurs CSV sur le même graphe
+- **Mini-visualisation** : aperçu ASCII de chaque colonne lors du choix de l'axe
+- **Export / Fusion** : concatène les datasets sélectionnés en un seul CSV
+
+---
+
+### `pptx_chart_extractor.py` — Extracteur de graphes PowerPoint
+
+Extrait les données des graphes d'un fichier `.pptx` en utilisant uniquement la bibliothèque standard Python (`zipfile` + `xml.etree.ElementTree`). Exporte les données en CSV et/ou restitue les graphes en PNG.
+
+#### Prérequis
+
+```bash
+pip install pandas matplotlib numpy
+```
+
+#### Usage
+
+```bash
+python pptx_chart_extractor.py [fichier.pptx] [-o dossier_sortie]
+```
+
+| Option | Défaut | Description |
+|--------|--------|-------------|
+| `fichier` | *(interactif)* | Fichier `.pptx` à analyser |
+| `-o, --output DOSSIER` | `pptx_export` | Dossier de sortie pour les CSV et PNG |
+
+#### Fonctionnalités
+
+- Détecte tous les types de graphes Office : ligne, barres, scatter, pie/donut, aire, radar, surface
+- Extrait les séries avec leurs catégories X et valeurs Y
+- Export CSV par graphe (`graphe_01_titre.csv`)
+- Rendu matplotlib : affichage écran ou sauvegarde PNG (150 dpi)
+- Export complet en une commande (tous les graphes → CSV + PNG)
+
+#### Types de graphes supportés
+
+`lineChart`, `barChart`, `scatterChart`, `pieChart`, `doughnutChart`, `areaChart`, `radarChart`, `stockChart`, `surfaceChart` (et variantes 3D)
+
+---
+
 ## Auteur
 
-Téo LEROY — v9.0
+Téo LEROY

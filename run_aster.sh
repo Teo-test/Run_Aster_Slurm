@@ -40,13 +40,13 @@
 # ══════════════════════════════════════════
 
 ASTER_ROOT="${ASTER_ROOT:-/opt/code_aster}"   # Racine de l'installation Code_Aster
-ASTER_MODULE="${ASTER_MODULE:-code_aster}"    # Nom du module Lmod a charger
+ASTER_MODULE="${ASTER_MODULE:-}"    # Nom du module Lmod a charger
 SCRATCH_BASE="${SCRATCH_BASE:-/scratch}"      # Racine du filesystem scratch (partage login/calcul)
 
 # Ressources Slurm par defaut (utilisees si aucune option ni preset n'est donne)
 DEFAULT_PARTITION="court"
 DEFAULT_NODES=1
-DEFAULT_NTASKS=4     # Nombre de taches MPI par defaut
+DEFAULT_NTASKS=1     # Nombre de taches MPI par defaut
 DEFAULT_CPUS=1       # CPUs par tache MPI (threading OpenMP, generalement 1)
 DEFAULT_MEM="5G"
 DEFAULT_TIME="05:00:00"
@@ -54,9 +54,9 @@ DEFAULT_TIME="05:00:00"
 # Presets : raccourcis pour les configurations typiques du cluster.
 # Chaque preset definit partition, ntasks, memoire et duree maximale.
 # Les valeurs peuvent etre surchargees apres -P (ex: -P moyen -t 8).
-PRESET_COURT_PARTITION="court"  ; PRESET_COURT_NTASKS=4  ; PRESET_COURT_MEM="2G"  ; PRESET_COURT_TIME="05:00:00"
-PRESET_MOYEN_PARTITION="moyen"  ; PRESET_MOYEN_NTASKS=4  ; PRESET_MOYEN_MEM="20G"  ; PRESET_MOYEN_TIME="03-00:00:00"
-PRESET_LONG_PARTITION="long"    ; PRESET_LONG_NTASKS=4   ; PRESET_LONG_MEM="50G"  ; PRESET_LONG_TIME="30-00:00:00"
+PRESET_COURT_PARTITION="court"  ; PRESET_COURT_NTASKS=1  ; PRESET_COURT_MEM="2G"  ; PRESET_COURT_TIME="05:00:00"
+PRESET_MOYEN_PARTITION="normal"  ; PRESET_MOYEN_NTASKS=1  ; PRESET_MOYEN_MEM="20G"  ; PRESET_MOYEN_TIME="03-00:00:00"
+PRESET_LONG_PARTITION="long"    ; PRESET_LONG_NTASKS=1   ; PRESET_LONG_MEM="50G"  ; PRESET_LONG_TIME="30-00:00:00"
 
 # ══════════════════════════════════════════
 #  FONCTIONS D'AFFICHAGE
@@ -650,7 +650,7 @@ EXPORT="${SCRATCH}/${STUDY_NAME}.export"
             TYPE="${item%%:*}"; UNIT="${item##*:}"
             # Correspondance type -> extension de fichier
             case "$TYPE" in
-                rmed) EXT="med" ;; resu) EXT="resu" ;; mess) EXT="mess" ;;
+                rmed) EXT="rmed" ;; resu) EXT="resu" ;; mess) EXT="mess" ;;
                 csv) EXT="csv" ;; table) EXT="table" ;; dat) EXT="dat" ;;
                 pos) EXT="pos" ;; *) EXT="$TYPE" ;;
             esac
@@ -658,10 +658,13 @@ EXPORT="${SCRATCH}/${STUDY_NAME}.export"
         done
     fi
 
-    # Repertoire de sortie libre (REPE_OUT) : certaines commandes Aster
-    # (ex: IMPR_RESU avec repertoire) ecrivent dans ce dossier.
-    # "R" en debut de ligne = type repertoire (vs "F" pour fichier).
-    echo "R ${SCRATCH}/REPE_OUT R 0"
+
+    # --------------- RESULTATS SUPPLEMENTAIRES (optionnels) ---------------
+
+    # # Repertoire de sortie libre (REPE_OUT) : certaines commandes Aster
+    # # (ex: IMPR_RESU avec repertoire) ecrivent dans ce dossier.
+    # # "R" en debut de ligne = type repertoire (vs "F" pour fichier).
+    # echo "R ${SCRATCH}/REPE_OUT R 0"
 
 } > "$EXPORT"
 
@@ -808,8 +811,8 @@ CMD=(sbatch --parsable
     --cpus-per-task="$CPUS"
     --mem="$MEM"
     --time="$TIME_LIMIT"
-    --output="${STUDY_DIR}/aster_%j.out"    # %j = JOB ID, remplace automatiquement
-    --error="${STUDY_DIR}/aster_%j.err"
+    --output="${STUDY_DIR}/aster_run_%j.out"    # %j = JOB ID, remplace automatiquement
+    --error="${STUDY_DIR}/aster_run_%j.err"
     --export="$VARS"
     "$SELF"   # Ce meme script, execute en Phase 2 sur le noeud de calcul
 )
@@ -833,9 +836,12 @@ else
     ok "Job $JOB soumis"
     echo ""
     echo "  squeue -j $JOB"
-    echo "  tail -f ${STUDY_DIR}/aster_${JOB}.out"
+    echo "  tail -f ${STUDY_DIR}/aster_run_${JOB}.out"
     echo "  scancel $JOB"
     echo "  ls ${STUDY_DIR}/run_${JOB}/"
+    echo "  squeue -j $JOB -h -o '%T'  # Etat du job (PENDING/RUNNING/...)"
+    echo "  sacct -j $JOB --format=JobID,State,ExitCode  # Bilan apres fin du job"
+    echo "  sview ${STUDY_DIR}/aster_run_${JOB}.out  #interface graphique de suivi en temps reel (si disponible)"
     echo ""
-    [ "$FOLLOW" = "1" ] && _follow_job "$JOB" "${STUDY_DIR}/aster_${JOB}.out"
+    [ "$FOLLOW" = "1" ] && _follow_job "$JOB" "${STUDY_DIR}/aster_run_${JOB}.out"
 fi

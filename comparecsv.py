@@ -152,8 +152,41 @@ def afficher_stats(datasets):
         print(df.describe().to_string())
 
 # ─── Sélection des colonnes ─────────────────────────────────────────────────
+
+def _mini_barre(valeurs, largeur=12):
+    """
+    Génère une mini barre ASCII proportionnelle à la valeur.
+    Pour colonnes numériques : barre de progression.
+    Pour colonnes texte : affiche les valeurs uniques.
+    """
+    try:
+        nums = pd.to_numeric(valeurs, errors='coerce').dropna()
+        if len(nums) == 0:
+            raise ValueError
+        vmin, vmax = nums.min(), nums.max()
+        etendue = vmax - vmin if vmax != vmin else 1
+        # Résumé : min / moy / max
+        moy = nums.mean()
+        remplissage = int((moy - vmin) / etendue * largeur)
+        barre = "█" * remplissage + "░" * (largeur - remplissage)
+        return (f"{C.DIM}[{C.CYAN}{barre}{C.DIM}]{C.RESET} "
+                f"{C.DIM}min={vmin:.3g} moy={moy:.3g} max={vmax:.3g} "
+                f"n={len(nums)}{C.RESET}")
+    except Exception:
+        pass
+
+    # Colonne texte : valeurs uniques
+    uniques = valeurs.dropna().astype(str).unique()
+    n = len(uniques)
+    apercu = ", ".join(uniques[:4])
+    if n > 4:
+        apercu += f", … ({n} uniques)"
+    return f"{C.DIM}[{apercu}]{C.RESET}"
+
 def choisir_colonne(df, message, filtre_num=False):
-    """Fait choisir une colonne parmi celles du dataframe."""
+    """
+    Fait choisir une colonne avec mini-visu des valeurs pour chaque option.
+    """
     if filtre_num:
         cols = df.select_dtypes(include='number').columns.tolist()
         if not cols:
@@ -161,9 +194,52 @@ def choisir_colonne(df, message, filtre_num=False):
             return None
     else:
         cols = df.columns.tolist()
-    
-    idx = menu_numerote(message, cols)
-    return cols[idx]
+
+    print(f"\n{C.BOLD}  {message}{C.RESET}")
+    for i, col in enumerate(cols, 1):
+        visu = _mini_barre(df[col])
+        print(f"    {C.CYAN}{i:>2}{C.RESET}. {C.BOLD}{col:<20}{C.RESET}  {visu}")
+    print()
+
+    while True:
+        entree = input(f"  {C.BOLD}Choix{C.RESET} : ").strip()
+        try:
+            c = int(entree) - 1
+            if 0 <= c < len(cols):
+                return cols[c]
+        except ValueError:
+            pass
+        erreur("Entrée invalide, réessaie.")
+
+def choisir_colonne_multi(df, message, filtre_num=False):
+    """
+    Fait choisir plusieurs colonnes avec mini-visu des valeurs.
+    """
+    if filtre_num:
+        cols = df.select_dtypes(include='number').columns.tolist()
+        if not cols:
+            erreur("Aucune colonne numérique disponible.")
+            return []
+    else:
+        cols = df.columns.tolist()
+
+    print(f"\n{C.BOLD}  {message}{C.RESET}")
+    for i, col in enumerate(cols, 1):
+        visu = _mini_barre(df[col])
+        print(f"    {C.CYAN}{i:>2}{C.RESET}. {C.BOLD}{col:<20}{C.RESET}  {visu}")
+    print()
+
+    while True:
+        entree = input(f"  {C.BOLD}Choix (ex: 1 3 ou 'all'){C.RESET} : ").strip()
+        if entree.lower() == "all":
+            return cols
+        try:
+            idxs = [int(x) - 1 for x in entree.split()]
+            if idxs and all(0 <= i < len(cols) for i in idxs):
+                return [cols[i] for i in idxs]
+        except ValueError:
+            pass
+        erreur("Entrée invalide, réessaie.")
 
 def choisir_datasets(datasets, allow_multiple=True):
     """Fait choisir un ou plusieurs datasets."""
@@ -204,31 +280,44 @@ def couleurs_datasets(n):
 # ── Graphe ligne ─────────────────────────────────────────────────────────────
 def graphe_ligne(datasets, selection):
     print()
-    # Référence sur premier dataset pour colonnes X
-    df_ref = datasets[selection[0]]["df"]
-    col_x = choisir_colonne(df_ref, "Colonne X (abscisse)")
-    if col_x is None: return
-
-    # Colonnes Y : peut en choisir plusieurs
-    cols_y_dispo = df_ref.select_dtypes(include='number').columns.tolist()
-    if not cols_y_dispo:
-        erreur("Aucune colonne numérique pour Y.")
-        return
-    idxs_y = menu_numerote("Colonnes Y (peut en choisir plusieurs, ex: 1 3)", cols_y_dispo, allow_multiple=True)
-    cols_y = [cols_y_dispo[i] for i in idxs_y]
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    couleurs = couleurs_datasets(len(selection) * len(cols_y))
-    c_idx = 0
+    # Construire la liste de toutes les séries : (nom_dataset, col_y)
+    series = []
     for nom in selection:
         df = datasets[nom]["df"]
+        cols_y = choisir_colonne_multi(
+            df,
+            f"[{C.MAGENTA}{nom}{C.RESET}] Colonnes Y",
+            filtre_num=True
+        )
         for col_y in cols_y:
-            if col_y not in df.columns: continue
-            label = f"{nom} — {col_y}" if len(selection) > 1 else col_y
-            ax.plot(df[col_x], df[col_y], label=label, color=couleurs[c_idx], linewidth=1.8, marker='o', markersize=3)
-            c_idx += 1
+            series.append((nom, col_y))
 
-    appliquer_style(ax, "Graphe Ligne", col_x, "Valeur")
+    if not series:
+        return
+
+    # Choisir X pour chaque série
+    titre("CHOIX DE L'AXE X PAR SÉRIE")
+    series_configs = []
+    for nom, col_y in series:
+        df = datasets[nom]["df"]
+        info(f"Série  {C.BOLD}{C.MAGENTA}{nom}{C.RESET} — {C.BOLD}{col_y}{C.RESET}")
+        col_x = choisir_colonne(df, f"Colonne X pour '{col_y}'")
+        if col_x:
+            series_configs.append((nom, col_x, col_y))
+
+    if not series_configs:
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    clrs = couleurs_datasets(len(series_configs))
+    for i, (nom, col_x, col_y) in enumerate(series_configs):
+        df = datasets[nom]["df"]
+        label = f"{nom} — {col_y}" if len(selection) > 1 else col_y
+        ax.plot(df[col_x], df[col_y], label=label, color=clrs[i],
+                linewidth=1.8, marker='o', markersize=3)
+
+    x_labels = ", ".join(set(cfg[1] for cfg in series_configs))
+    appliquer_style(ax, "Graphe Ligne", x_labels, "Valeur")
     ax.legend(fontsize=8)
     plt.tight_layout()
     plt.show()
@@ -236,50 +325,101 @@ def graphe_ligne(datasets, selection):
 # ── Scatter ──────────────────────────────────────────────────────────────────
 def graphe_scatter(datasets, selection):
     print()
-    df_ref = datasets[selection[0]]["df"]
-    col_x = choisir_colonne(df_ref, "Colonne X", filtre_num=True)
-    col_y = choisir_colonne(df_ref, "Colonne Y", filtre_num=True)
-    if col_x is None or col_y is None: return
+    series = []
+    for nom in selection:
+        df = datasets[nom]["df"]
+        cols_y = choisir_colonne_multi(
+            df,
+            f"[{C.MAGENTA}{nom}{C.RESET}] Colonnes Y (numériques)",
+            filtre_num=True
+        )
+        for col_y in cols_y:
+            series.append((nom, col_y))
+
+    if not series:
+        return
+
+    titre("CHOIX DE L'AXE X PAR SÉRIE")
+    series_configs = []
+    for nom, col_y in series:
+        df = datasets[nom]["df"]
+        info(f"Série  {C.BOLD}{C.MAGENTA}{nom}{C.RESET} — {C.BOLD}{col_y}{C.RESET}")
+        col_x = choisir_colonne(df, f"Colonne X pour '{col_y}'", filtre_num=True)
+        if col_x:
+            series_configs.append((nom, col_x, col_y))
+
+    if not series_configs:
+        return
 
     fig, ax = plt.subplots(figsize=(8, 6))
-    couleurs = couleurs_datasets(len(selection))
-    for i, nom in enumerate(selection):
+    clrs = couleurs_datasets(len(series_configs))
+    for i, (nom, col_x, col_y) in enumerate(series_configs):
         df = datasets[nom]["df"]
-        if col_x not in df.columns or col_y not in df.columns:
-            warn(f"Colonnes manquantes dans {nom}")
-            continue
-        ax.scatter(df[col_x], df[col_y], label=nom, color=couleurs[i], alpha=0.65, s=30, edgecolors='none')
+        label = f"{nom} — {col_y}" if len(selection) > 1 else col_y
+        ax.scatter(df[col_x], df[col_y], label=label, color=clrs[i],
+                   alpha=0.65, s=30, edgecolors='none')
 
-    appliquer_style(ax, f"Scatter : {col_x} vs {col_y}", col_x, col_y)
-    if len(selection) > 1: ax.legend(fontsize=8)
+    x_labels = ", ".join(set(cfg[1] for cfg in series_configs))
+    appliquer_style(ax, "Nuage de points", x_labels, "Y")
+    if len(series_configs) > 1:
+        ax.legend(fontsize=8)
     plt.tight_layout()
     plt.show()
 
 # ── Barres ───────────────────────────────────────────────────────────────────
 def graphe_barres(datasets, selection):
     print()
-    df_ref = datasets[selection[0]]["df"]
-    col_x = choisir_colonne(df_ref, "Colonne catégories (X)")
-    col_y = choisir_colonne(df_ref, "Colonne valeurs (Y)", filtre_num=True)
-    if col_x is None or col_y is None: return
+    series = []
+    for nom in selection:
+        df = datasets[nom]["df"]
+        cols_y = choisir_colonne_multi(
+            df,
+            f"[{C.MAGENTA}{nom}{C.RESET}] Colonnes Y (valeurs)",
+            filtre_num=True
+        )
+        for col_y in cols_y:
+            series.append((nom, col_y))
+
+    if not series:
+        return
+
+    titre("CHOIX DE L'AXE X PAR SÉRIE")
+    series_configs = []
+    for nom, col_y in series:
+        df = datasets[nom]["df"]
+        info(f"Série  {C.BOLD}{C.MAGENTA}{nom}{C.RESET} — {C.BOLD}{col_y}{C.RESET}")
+        col_x = choisir_colonne(df, f"Colonne catégories X pour '{col_y}'")
+        if col_x:
+            series_configs.append((nom, col_x, col_y))
+
+    if not series_configs:
+        return
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    n = len(selection)
-    couleurs = couleurs_datasets(n)
+    n    = len(series_configs)
+    clrs = couleurs_datasets(n)
     width = 0.8 / max(n, 1)
 
-    for i, nom in enumerate(selection):
+    # Référence des catégories X de la première série pour positionner les ticks
+    nom0, col_x0, col_y0 = series_configs[0]
+    grouped0 = datasets[nom0]["df"].groupby(col_x0)[col_y0].mean().reset_index()
+    x_ref = np.arange(len(grouped0))
+
+    for i, (nom, col_x, col_y) in enumerate(series_configs):
         df = datasets[nom]["df"]
-        if col_x not in df.columns or col_y not in df.columns: continue
         grouped = df.groupby(col_x)[col_y].mean().reset_index()
         x = np.arange(len(grouped))
-        offset = (i - n/2 + 0.5) * width
-        ax.bar(x + offset, grouped[col_y], width=width * 0.9, label=nom, color=couleurs[i], alpha=0.85)
-        ax.set_xticks(x)
-        ax.set_xticklabels(grouped[col_x], rotation=45, ha='right', fontsize=8)
+        offset = (i - n / 2 + 0.5) * width
+        label = f"{nom} — {col_y}" if len(selection) > 1 else col_y
+        ax.bar(x + offset, grouped[col_y], width=width * 0.9,
+               label=label, color=clrs[i], alpha=0.85)
+        if i == 0:
+            ax.set_xticks(x)
+            ax.set_xticklabels(grouped[col_x], rotation=45, ha='right', fontsize=8)
 
-    appliquer_style(ax, f"Barres : {col_y} par {col_x}", col_x, col_y)
-    if len(selection) > 1: ax.legend(fontsize=8)
+    x_labels = ", ".join(set(cfg[1] for cfg in series_configs))
+    appliquer_style(ax, "Graphe Barres", x_labels, "Valeur")
+    if n > 1: ax.legend(fontsize=8)
     plt.tight_layout()
     plt.show()
 
@@ -309,9 +449,9 @@ def graphe_histo(datasets, selection):
 def graphe_boxplot(datasets, selection):
     print()
     df_ref = datasets[selection[0]]["df"]
-    cols_num = df_ref.select_dtypes(include='number').columns.tolist()
-    idxs = menu_numerote("Colonnes à comparer (ex: 1 2 3 ou 'all')", cols_num, allow_multiple=True)
-    cols = [cols_num[i] for i in idxs]
+    cols = choisir_colonne_multi(df_ref, "Colonnes à comparer", filtre_num=True)
+    if not cols:
+        return
 
     fig, axes = plt.subplots(1, len(cols), figsize=(4 * len(cols), 5), squeeze=False)
     couleurs = couleurs_datasets(len(selection))
@@ -342,20 +482,20 @@ def graphe_boxplot(datasets, selection):
 # ── Aire empilée ──────────────────────────────────────────────────────────────
 def graphe_aire(datasets, selection):
     print()
-    df_ref = datasets[selection[0]]["df"]
-    col_x = choisir_colonne(df_ref, "Colonne X (abscisse)")
-    cols_num = df_ref.select_dtypes(include='number').columns.tolist()
-    idxs_y = menu_numerote("Colonnes Y à empiler (ex: 1 2 ou 'all')", cols_num, allow_multiple=True)
-    cols_y = [cols_num[i] for i in idxs_y]
-
     nom = selection[0]
     if len(selection) > 1:
         info("Aire empilée fonctionne sur un seul dataset — utilisation du premier.")
     df = datasets[nom]["df"]
 
+    col_x  = choisir_colonne(df, "Colonne X (abscisse)")
+    cols_y = choisir_colonne_multi(df, "Colonnes Y à empiler", filtre_num=True)
+    if not cols_y:
+        return
+
     fig, ax = plt.subplots(figsize=(10, 5))
-    couleurs = couleurs_datasets(len(cols_y))
-    ax.stackplot(df[col_x], [df[c] for c in cols_y if c in df.columns], labels=cols_y, colors=couleurs, alpha=0.8)
+    clrs = couleurs_datasets(len(cols_y))
+    ax.stackplot(df[col_x], [df[c] for c in cols_y if c in df.columns],
+                 labels=cols_y, colors=clrs, alpha=0.8)
     appliquer_style(ax, f"Aire empilée — {nom}", col_x, "Valeur cumulée")
     ax.legend(fontsize=8, loc='upper left')
     plt.tight_layout()
@@ -413,7 +553,7 @@ def menu_graphe(datasets):
     }
     dispatch[type_graphe](datasets, selection)
 
-# ─── Exportation ────────────────────────────────────────────────────────────
+# ─── Exportation ──────────────────────
 def exporter_merge(datasets):
     """Fusionne et exporte les datasets sélectionnés."""
     titre("EXPORTER / FUSIONNER")
@@ -441,7 +581,7 @@ def main():
 
     print(f"\n{C.CYAN}{C.BOLD}")
     print("  ╔══════════════════════════════════════════╗")
-    print("  ║        CSV COMPARATOR  v1.0              ║")
+    print("  ║        CSV COMPARATOR  v2.0              ║")
     print("  ║   Comparateur interactif de fichiers     ║")
     print("  ╚══════════════════════════════════════════╝")
     print(C.RESET)

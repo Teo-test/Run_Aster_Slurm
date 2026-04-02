@@ -13,7 +13,11 @@ Ensemble d'outils pour soumettre des calculs **Code_Aster** via **Slurm** et exp
 | Comparer des CSV | `python Outil_annexes/comparecsv_v3.py [fichiers.csv ...]` |
 | Extraire des graphes PPTX| `python Outil_annexes/pptx_chart_extractor_v2.py [fichier.pptx]` |
 
-> **Navigation commune aux outils Python** : `↑↓` pour naviguer, `Espace` pour cocher/décocher, `Entrée` pour valider, `Ctrl+C` pour annuler.
+> **Navigation commune aux outils Python** :
+> - `↑↓` pour naviguer
+> - `Espace` pour cocher/décocher
+> - `Entrée` pour valider
+> - `Ctrl+C` pour annuler.
 
 ---
 
@@ -98,7 +102,7 @@ Les options passées **après** `-P` surchargent le preset : `-P moyen -t 8`
 | 6     | `mess` | `.mess`   | Log d'exécution |
 | 8     | `resu` | `.resu`   | Résultats texte |
 | 38    | `csv`  | `.csv`    | Tableau (IMPR_TABLE) |
-| 80    | `rmed` | `.med`    | Résultats MED (ParaVis) |
+| 80    | `rmed` | `.rmed`    | Résultats MED (ParaVis) |
 | 81+   | `rmed` | `.med`    | Résultats MED supplémentaires |
 
 Dans le `.comm` : `IMPR_RESU(UNITE=81, ...)` / `IMPR_TABLE(UNITE=38, ...)`

@@ -72,7 +72,7 @@ PRESET_LONG_PARTITION="long"    ; PRESET_LONG_NTASKS=1   ; PRESET_LONG_MEM="50G"
 # ══════════════════════════════════════════
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
 
 info()    { echo -e "${BLUE}[INFO]${NC}  $*"; }
 ok()      { echo -e "${GREEN}[ OK ]${NC}  $*"; }
@@ -85,6 +85,253 @@ header()  {
     echo "========================================================"
     echo "  $*"
     echo "========================================================"
+}
+
+# ══════════════════════════════════════════
+#  NAVIGATION CLAVIER — menus interactifs flèches ↑↓
+#
+#  Trois fonctions principales :
+#    menu_fleches "Question" "opt1" "opt2" ...
+#        → sélection unique, résultat dans $_MENU_IDX (0-based, -1 si Ctrl+C)
+#    menu_cases "Question" "opt1" "opt2" ...
+#        → cases à cocher (espace), résultat dans $_MENU_ITEMS (indices cochés)
+#    saisir "Label" "defaut"
+#        → saisie texte, résultat dans $_SAISIE
+#
+#  Tout le rendu va sur /dev/tty pour ne pas polluer stdout.
+# ══════════════════════════════════════════
+
+_MENU_IDX=0
+_MENU_ITEMS=()
+_SAISIE=""
+_TOUCHE=""
+
+# Lit une touche — capture les séquences ESC (flèches = ESC [ A/B)
+_lire_touche() {
+    local k1 k2 k3
+    IFS= read -r -s -n1 k1 </dev/tty
+    if [[ "$k1" == $'\x1b' ]]; then
+        IFS= read -r -s -n1 -t 0.05 k2 </dev/tty || k2=""
+        IFS= read -r -s -n1 -t 0.05 k3 </dev/tty || k3=""
+        _TOUCHE="${k1}${k2}${k3}"
+    else
+        _TOUCHE="$k1"
+    fi
+}
+
+# Dessine les lignes d'un menu simple (utilisé par menu_fleches)
+_dessiner_menu() {
+    local sel="$1"; shift
+    local i
+    local opts=("$@")
+    for ((i=0; i<${#opts[@]}; i++)); do
+        if ((i == sel)); then
+            printf "  ${CYAN}${BOLD}❯ %-55s${NC}\n" "${opts[$i]}" >/dev/tty
+        else
+            printf "    %-55s\n" "${opts[$i]}" >/dev/tty
+        fi
+    done
+}
+
+# Dessine les lignes d'un menu cases (utilisé par menu_cases)
+# $_COCHES est un tableau global 0/1 partagé avec menu_cases
+_COCHES=()
+_dessiner_cases() {
+    local sel="$1"; shift
+    local opts=("$@")
+    local i marq
+    for ((i=0; i<${#opts[@]}; i++)); do
+        ((i == sel)) && marq="${CYAN}${BOLD}❯${NC}" || marq=" "
+        if ((_COCHES[i] == 1)); then
+            printf "  %b [${GREEN}✔${NC}] %-51s\n" "$marq" "${opts[$i]}" >/dev/tty
+        else
+            printf "  %b [ ] %-51s\n"               "$marq" "${opts[$i]}" >/dev/tty
+        fi
+    done
+}
+
+# Sélection unique avec flèches — résultat dans $_MENU_IDX
+menu_fleches() {
+    local msg="$1"; shift
+    local opts=("$@")
+    local n=${#opts[@]}
+    local sel=0
+
+    printf "\n${BOLD}  %s${NC}\n" "$msg" >/dev/tty
+    tput civis >/dev/tty 2>/dev/null
+    _dessiner_menu "$sel" "${opts[@]}"
+
+    while true; do
+        _lire_touche
+        case "$_TOUCHE" in
+            $'\x1b[A') ((sel = (sel - 1 + n) % n)) ;;   # Flèche haut
+            $'\x1b[B') ((sel = (sel + 1) % n))     ;;   # Flèche bas
+            $'\x0d'|'') break ;;                         # Entrée
+            $'\x03')                                      # Ctrl+C
+                tput cnorm >/dev/tty 2>/dev/null
+                printf "\n" >/dev/tty
+                _MENU_IDX=-1; return ;;
+        esac
+        printf "\033[%dA" "$n" >/dev/tty
+        _dessiner_menu "$sel" "${opts[@]}"
+    done
+
+    # Affichage final : ✔ sur la sélection, effacer les autres
+    printf "\033[%dA" "$n" >/dev/tty
+    local i
+    for ((i=0; i<n; i++)); do
+        if ((i == sel)); then
+            printf "  ${GREEN}✔ ${BOLD}%-55s${NC}\n" "${opts[$i]}" >/dev/tty
+        else
+            printf "\033[2K\r\033[1B" >/dev/tty   # effacer + descendre sans imprimer
+        fi
+    done
+    tput cnorm >/dev/tty 2>/dev/null
+    _MENU_IDX="$sel"
+}
+
+# Sélection multiple avec espace — résultat dans $_MENU_ITEMS
+menu_cases() {
+    local msg="$1"; shift
+    local opts=("$@")
+    local n=${#opts[@]}
+    local sel=0
+    local i
+    _COCHES=()
+    for ((i=0; i<n; i++)); do _COCHES[$i]=0; done
+
+    printf "\n${BOLD}  %s${NC}\n"                                      "$msg" >/dev/tty
+    printf "  ${DIM}(espace : cocher/décocher  —  entrée : valider)${NC}\n" >/dev/tty
+    tput civis >/dev/tty 2>/dev/null
+    _dessiner_cases "$sel" "${opts[@]}"
+
+    while true; do
+        _lire_touche
+        case "$_TOUCHE" in
+            $'\x1b[A') ((sel = (sel - 1 + n) % n)) ;;
+            $'\x1b[B') ((sel = (sel + 1) % n))     ;;
+            ' ')        ((_COCHES[sel] ^= 1))       ;;   # Toggle
+            $'\x0d'|'') break ;;
+            $'\x03')
+                tput cnorm >/dev/tty 2>/dev/null
+                printf "\n" >/dev/tty
+                _MENU_ITEMS=(); return ;;
+        esac
+        printf "\033[%dA" "$n" >/dev/tty
+        _dessiner_cases "$sel" "${opts[@]}"
+    done
+
+    tput cnorm >/dev/tty 2>/dev/null
+    _MENU_ITEMS=()
+    for ((i=0; i<n; i++)); do
+        ((_COCHES[i] == 1)) && _MENU_ITEMS+=("$i")
+    done
+}
+
+# Saisie texte avec valeur par défaut — résultat dans $_SAISIE
+saisir() {
+    local msg="$1" defaut="${2:-}"
+    if [ -n "$defaut" ]; then
+        printf "  ${BOLD}%s${NC} [${DIM}%s${NC}] : " "$msg" "$defaut" >/dev/tty
+    else
+        printf "  ${BOLD}%s${NC} : " "$msg" >/dev/tty
+    fi
+    IFS= read -r _SAISIE </dev/tty
+    [ -z "$_SAISIE" ] && _SAISIE="$defaut"
+}
+
+# ══════════════════════════════════════════
+#  MODE INTERACTIF
+#  Lance un wizard de configuration quand le script est appelé sans argument.
+#  Remplit les mêmes variables que le parsing CLI :
+#    STUDY_DIR, PARTITION, NODES, NTASKS, CPUS, MEM, TIME_LIMIT,
+#    FOLLOW, KEEP_SCRATCH, DRY_RUN
+# ══════════════════════════════════════════
+mode_interactif() {
+    printf "\n${CYAN}${BOLD}" >/dev/tty
+    printf "  ╔══════════════════════════════════════════╗\n" >/dev/tty
+    printf "  ║       RUN ASTER — Mode interactif        ║\n" >/dev/tty
+    printf "  ║   Navigation  ↑↓  •  espace  •  entrée   ║\n" >/dev/tty
+    printf "  ╚══════════════════════════════════════════╝\n" >/dev/tty
+    printf "${NC}\n" >/dev/tty
+
+    # ── 1. Dossier d'étude ────────────────────────────────────────────────
+    section "Dossier d'étude"
+
+    # Cherche les dossiers contenant au moins un .comm (max 2 niveaux)
+    local -a dossiers=()
+    local d
+    while IFS= read -r d; do
+        dossiers+=("$d")
+    done < <(find . -maxdepth 2 -name "*.comm" -printf '%h\n' 2>/dev/null \
+             | sort -u | sed 's|^\./\?||;/^$/d')
+    [ ${#dossiers[@]} -eq 0 ] && dossiers=(".")
+
+    if [ ${#dossiers[@]} -gt 1 ]; then
+        menu_fleches "Dossier d'étude (contient un .comm) :" "${dossiers[@]}"
+        [ "$_MENU_IDX" -eq -1 ] && { warn "Annulé."; exit 0; }
+        STUDY_DIR="${dossiers[$_MENU_IDX]}"
+    else
+        saisir "Dossier d'étude" "${dossiers[0]}"
+        STUDY_DIR="$_SAISIE"
+    fi
+    ok "Dossier : $STUDY_DIR"
+
+    # ── 2. Preset de ressources ───────────────────────────────────────────
+    section "Ressources Slurm"
+    menu_fleches "Preset de ressources :" \
+        "court   — partition:${PRESET_COURT_PARTITION}  tâches:${PRESET_COURT_NTASKS}  mém:${PRESET_COURT_MEM}  durée:${PRESET_COURT_TIME}" \
+        "moyen   — partition:${PRESET_MOYEN_PARTITION}  tâches:${PRESET_MOYEN_NTASKS}  mém:${PRESET_MOYEN_MEM}  durée:${PRESET_MOYEN_TIME}" \
+        "long    — partition:${PRESET_LONG_PARTITION}   tâches:${PRESET_LONG_NTASKS}   mém:${PRESET_LONG_MEM}   durée:${PRESET_LONG_TIME}" \
+        "Manuel  — saisir les valeurs"
+    [ "$_MENU_IDX" -eq -1 ] && { warn "Annulé."; exit 0; }
+
+    case "$_MENU_IDX" in
+        0)  PARTITION="$PRESET_COURT_PARTITION"; NTASKS="$PRESET_COURT_NTASKS"
+            MEM="$PRESET_COURT_MEM";             TIME_LIMIT="$PRESET_COURT_TIME" ;;
+        1)  PARTITION="$PRESET_MOYEN_PARTITION"; NTASKS="$PRESET_MOYEN_NTASKS"
+            MEM="$PRESET_MOYEN_MEM";             TIME_LIMIT="$PRESET_MOYEN_TIME" ;;
+        2)  PARTITION="$PRESET_LONG_PARTITION";  NTASKS="$PRESET_LONG_NTASKS"
+            MEM="$PRESET_LONG_MEM";              TIME_LIMIT="$PRESET_LONG_TIME"  ;;
+        3)  saisir "Partition"         "$DEFAULT_PARTITION"; PARTITION="$_SAISIE"
+            saisir "Nb nœuds"          "$DEFAULT_NODES";     NODES="$_SAISIE"
+            saisir "Nb tâches MPI"     "$DEFAULT_NTASKS";    NTASKS="$_SAISIE"
+            saisir "CPUs par tâche"    "$DEFAULT_CPUS";      CPUS="$_SAISIE"
+            saisir "Mémoire (ex: 8G)"  "$DEFAULT_MEM";       MEM="$_SAISIE"
+            saisir "Durée max"         "$DEFAULT_TIME";       TIME_LIMIT="$_SAISIE" ;;
+    esac
+    # Empêcher la re-application du preset par le code de parsing
+    PRESET=""
+
+    # ── 3. Options ────────────────────────────────────────────────────────
+    section "Options"
+    menu_cases "Options :" \
+        "Suivre le job en temps réel (--follow)" \
+        "Conserver le scratch après le calcul (--keep-scratch)" \
+        "Dry-run — afficher la commande sans soumettre (--dry-run)"
+
+    local idx
+    for idx in "${_MENU_ITEMS[@]}"; do
+        case "$idx" in
+            0) FOLLOW=1       ;;
+            1) KEEP_SCRATCH=1 ;;
+            2) DRY_RUN=1      ;;
+        esac
+    done
+
+    # ── 4. Récapitulatif + confirmation ───────────────────────────────────
+    section "Récapitulatif"
+    info "Dossier   : $STUDY_DIR"
+    info "Partition : ${PARTITION:-$DEFAULT_PARTITION}  Nœuds : ${NODES:-$DEFAULT_NODES}  Tâches : ${NTASKS:-$DEFAULT_NTASKS}  CPUs : ${CPUS:-$DEFAULT_CPUS}"
+    info "Mémoire   : ${MEM:-$DEFAULT_MEM}  |  Durée : ${TIME_LIMIT:-$DEFAULT_TIME}"
+    [ "$FOLLOW"       = "1" ] && info "Option    : --follow"
+    [ "$KEEP_SCRATCH" = "1" ] && info "Option    : --keep-scratch"
+    [ "$DRY_RUN"      = "1" ] && info "Option    : --dry-run"
+
+    menu_fleches "Confirmer ?" \
+        "Soumettre le calcul" \
+        "Annuler"
+    [ "$_MENU_IDX" -ne 0 ] && { warn "Annulé."; exit 0; }
 }
 
 # ══════════════════════════════════════════
@@ -109,7 +356,7 @@ RESULTATS SUPPLEMENTAIRES
 
 RESSOURCES SLURM
   -P, --preset  NOM     court, moyen ou long
-  -p, --partition NOM   Partition Slurm
+  -p, --partition NOM   Partition Slurm (ex: court, normal, long)
   -n, --nodes N         Nombre de noeuds
   -t, --ntasks N        Taches MPI
   -c, --cpus N          CPUs par tache
@@ -437,6 +684,9 @@ COMM="" ; MED="" ; MAIL=""
 PRESET="" ; PARTITION="" ; NODES="" ; NTASKS="" ; CPUS="" ; MEM="" ; TIME_LIMIT=""
 QUIET=false ; RESULTS="" ; KEEP_SCRATCH=0 ; DRY_RUN=0 ; DEBUG=0 ; FOLLOW=0
 
+# Détecter l'appel sans argument pour déclencher le mode interactif
+[ $# -eq 0 ] && _INTERACTIF=1 || _INTERACTIF=0
+
 # ─────────────────────────────────────────────────────────────────
 # Parsing des arguments en ligne de commande
 #
@@ -478,10 +728,13 @@ done
 # apres -P de prendre precedence sur les valeurs du preset.
 # Ex: -P moyen -t 8  -> utilise les valeurs de moyen SAUF ntasks=8
 # ─────────────────────────────────────────────────────────────────
+# ── Mode interactif : lancé si aucun argument n'a été fourni ─────────────────
+[ "$_INTERACTIF" = "1" ] && mode_interactif
+
 if [ -n "$PRESET" ]; then
     case "${PRESET,,}" in
         court|short)  : "${PARTITION:=$PRESET_COURT_PARTITION}"; : "${NTASKS:=$PRESET_COURT_NTASKS}"; : "${MEM:=$PRESET_COURT_MEM}"; : "${TIME_LIMIT:=$PRESET_COURT_TIME}" ;;
-        moyen|medium) : "${PARTITION:=$PRESET_MOYEN_PARTITION}"; : "${NTASKS:=$PRESET_MOYEN_NTASKS}"; : "${MEM:=$PRESET_MOYEN_MEM}"; : "${TIME_LIMIT:=$PRESET_MOYEN_TIME}" ;;
+        normal|medium) : "${PARTITION:=$PRESET_MOYEN_PARTITION}"; : "${NTASKS:=$PRESET_MOYEN_NTASKS}"; : "${MEM:=$PRESET_MOYEN_MEM}"; : "${TIME_LIMIT:=$PRESET_MOYEN_TIME}" ;;
         long)         : "${PARTITION:=$PRESET_LONG_PARTITION}";  : "${NTASKS:=$PRESET_LONG_NTASKS}";  : "${MEM:=$PRESET_LONG_MEM}";  : "${TIME_LIMIT:=$PRESET_LONG_TIME}" ;;
         *) err "Preset inconnu : $PRESET"; exit 1 ;;
     esac

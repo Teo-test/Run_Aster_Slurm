@@ -29,7 +29,7 @@
 #  MPI et des conflits de gestionnaires de processus.
 #
 #  Auteur  : Teo LEROY
-#  Version : 10.0
+#  Version : 11.0
 #===============================================================================
 
 # ══════════════════════════════════════════
@@ -338,6 +338,22 @@ _parse_comm_outputs() {
 }
 
 # ══════════════════════════════════════════
+#  _verif_chemin : demande correction si le dossier $2 n'existe pas
+#    $1 = nom de la variable (pour le message)
+#    $2 = valeur actuelle du chemin
+#  Résultat : _SAISIE contient le nouveau chemin (ou l'ancien si correct)
+# ══════════════════════════════════════════
+_verif_chemin() {
+    local nom="$1" chemin="$2"
+    [ -d "$chemin" ] && { _SAISIE="$chemin"; return; }
+    section "Chemin $nom introuvable"
+    warn "$nom = $chemin  (dossier absent)"
+    saisir "Nouveau chemin $nom" "$chemin"
+    [ -d "$_SAISIE" ] && ok "$nom : $_SAISIE" \
+                      || warn "Dossier toujours absent — le calcul peut échouer"
+}
+
+# ══════════════════════════════════════════
 #  MODE INTERACTIF
 #  Lance un wizard de configuration quand le script est appelé sans argument.
 #  Remplit les mêmes variables que le parsing CLI :
@@ -354,23 +370,8 @@ mode_interactif() {
 
     # ── 0. Correction des chemins manquants ───────────────────────────────
     # On ne demande que si le chemin n'existe pas ; s'il existe on ne dérange pas.
-    if [ ! -d "$ASTER_ROOT" ]; then
-        section "Chemin Code_Aster introuvable"
-        warn "ASTER_ROOT = $ASTER_ROOT  (dossier absent)"
-        saisir "Nouveau chemin ASTER_ROOT" "$ASTER_ROOT"
-        ASTER_ROOT="$_SAISIE"
-        [ -d "$ASTER_ROOT" ] && ok "ASTER_ROOT : $ASTER_ROOT" \
-                             || warn "Dossier toujours absent — le calcul peut échouer"
-    fi
-
-    if [ ! -d "$SCRATCH_BASE" ]; then
-        section "Chemin scratch introuvable"
-        warn "SCRATCH_BASE = $SCRATCH_BASE  (dossier absent)"
-        saisir "Nouveau chemin SCRATCH_BASE" "$SCRATCH_BASE"
-        SCRATCH_BASE="$_SAISIE"
-        [ -d "$SCRATCH_BASE" ] && ok "SCRATCH_BASE : $SCRATCH_BASE" \
-                               || warn "Dossier toujours absent — le calcul peut échouer"
-    fi
+    _verif_chemin "ASTER_ROOT"   "$ASTER_ROOT";   ASTER_ROOT="$_SAISIE"
+    _verif_chemin "SCRATCH_BASE" "$SCRATCH_BASE"; SCRATCH_BASE="$_SAISIE"
 
     # ── 1. Dossier d'étude ────────────────────────────────────────────────
     section "Dossier d'étude"
@@ -575,6 +576,11 @@ if [ "${__RUN_PHASE:-}" = "EXEC" ]; then
     }
 
     # ─────────────────────────────────────────────────────────────────
+    # _log_dir : affiche le contenu d'un répertoire ligne par ligne via log()
+    # ─────────────────────────────────────────────────────────────────
+    _log_dir() { ls -la "$1" 2>/dev/null | while IFS= read -r l; do log "  $l"; done; }
+
+    # ─────────────────────────────────────────────────────────────────
     # collect_results : rapatrie les resultats du scratch vers le dossier
     # d'etude et nettoie le scratch.
     #
@@ -603,31 +609,27 @@ if [ "${__RUN_PHASE:-}" = "EXEC" ]; then
 
         # --- Debug : lister tout ce qu'il y a dans le scratch ---
         log "Fichiers presents dans le scratch :"
-        ls -la "${__SCRATCH}/" 2>/dev/null | while IFS= read -r l; do log "  $l"; done
+        _log_dir "${__SCRATCH}/"
         log ""
 
         # --- Resultats classiques ---
         # On parcourt toutes les extensions de fichiers que Code_Aster peut produire.
         # nullglob : si aucun fichier ne correspond au glob, la boucle est vide
         # (au lieu d'iterer sur la chaine litterale du glob).
+        # _copy_file_if_exists : copie $1 vers $dest si non vide, incrémente count
+        _copy_file_if_exists() {
+            local f="$1"
+            [ -f "$f" ] && [ -s "$f" ] || return 0
+            _cp "$f" "$dest/" && log "  -> $(basename "$f")" || log "  !! ECHEC copie : $(basename "$f")"
+            count=$((count + 1))
+        }
+
         shopt -s nullglob
         for ext in mess resu med csv table dat pos rmed txt vtu vtk py base; do
-            for f in "${__SCRATCH}"/*."${ext}"; do
-                if [ -f "$f" ] && [ -s "$f" ]; then
-                    _cp "$f" "$dest/" && log "  -> $(basename "$f")" || log "  !! ECHEC copie : $(basename "$f")"
-                    count=$((count + 1))
-                fi
-            done
+            for f in "${__SCRATCH}"/*."${ext}"; do _copy_file_if_exists "$f"; done
         done
-        shopt -u nullglob
-
-        # --- Fichiers glob/pick/vola (base Code_Aster) ---
-        shopt -s nullglob
         for f in "${__SCRATCH}"/glob.* "${__SCRATCH}"/pick.* "${__SCRATCH}"/vola.*; do
-            if [ -f "$f" ] && [ -s "$f" ]; then
-                _cp "$f" "$dest/" && log "  -> $(basename "$f")" || log "  !! ECHEC copie : $(basename "$f")"
-                count=$((count + 1))
-            fi
+            _copy_file_if_exists "$f"
         done
         shopt -u nullglob
 
@@ -651,7 +653,7 @@ if [ "${__RUN_PHASE:-}" = "EXEC" ]; then
 
         # --- Contenu final du dossier destination ---
         log "Contenu de $dest :"
-        ls -la "$dest/" 2>/dev/null | while IFS= read -r l; do log "  $l"; done
+        _log_dir "$dest/"
 
         # --- Nettoyage du scratch ---
         # Sauf si --keep-scratch a ete demande (utile pour deboguer un calcul
@@ -741,7 +743,7 @@ if [ "${__RUN_PHASE:-}" = "EXEC" ]; then
     # ─────────────────────────────────────────────────────────────────
     header "VERIFICATION"
     log "Contenu scratch :"
-    ls -la "$__SCRATCH/" 2>/dev/null | while IFS= read -r l; do log "  $l"; done
+    _log_dir "$__SCRATCH/"
     log ""
     log "Contenu .export :"
     # "while IFS= read -r l" preserve les espaces en debut de ligne et les
@@ -783,26 +785,32 @@ if [ "${__RUN_PHASE:-}" = "EXEC" ]; then
     # si grep ne trouve rien (retourne 1).
     # On affiche les 20 premieres lignes autour des erreurs pour le log.
     # ─────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────
+    # _diagnose_mess : analyse le fichier .mess et affiche le bilan
+    #   $1 = chemin du fichier .mess
+    #   Retourne 0 si succès, 1 si erreur fatale détectée
+    # ─────────────────────────────────────────────────────────────────
+    _diagnose_mess() {
+        local mess_file="$1"
+        [ -f "$mess_file" ] || { log "!! Pas de .mess — le calcul n'a peut-être pas démarré"; return 1; }
+        local na nf ns
+        na=$(grep -c "<A>" "$mess_file" 2>/dev/null || true)
+        nf=$(grep -c "<F>" "$mess_file" 2>/dev/null || true)
+        ns=$(grep -c "<S>" "$mess_file" 2>/dev/null || true)
+        log "Alarmes <A>:$na  Fatales <F>:$nf  Exceptions <S>:$ns"
+        [ "$nf" -gt 0 ] && grep -B2 -A5 "<F>" "$mess_file" | head -20
+        [ "$ns" -gt 0 ] && [ "$nf" -eq 0 ] && grep -B2 -A5 "<S>" "$mess_file" | head -20
+        [ "$nf" -gt 0 ] && return 1 || return 0
+    }
+
     header "DIAGNOSTIC"
     MESS="${__SCRATCH}/${__STUDY_NAME}.mess"
-    if [ -f "$MESS" ]; then
-        NA=$(grep -c "<A>" "$MESS" 2>/dev/null || true)
-        NF=$(grep -c "<F>" "$MESS" 2>/dev/null || true)
-        NS=$(grep -c "<S>" "$MESS" 2>/dev/null || true)
-        log "Alarmes <A>:$NA  Fatales <F>:$NF  Exceptions <S>:$NS"
-        # Affiche le contexte autour des erreurs fatales (-B2 = 2 lignes avant, -A5 = 5 apres)
-        [ "$NF" -gt 0 ] && { grep -B2 -A5 "<F>" "$MESS" | head -20; }
-        # N'affiche les exceptions que s'il n'y a pas d'erreur fatale (deja affichee)
-        [ "$NS" -gt 0 ] && [ "$NF" -eq 0 ] && { grep -B2 -A5 "<S>" "$MESS" | head -20; }
-    else
-        log "!! Pas de .mess — le calcul n'a peut-etre pas demarre"
-        ls -la "$__SCRATCH/" 2>/dev/null
-    fi
+    _diagnose_mess "$MESS" || _log_dir "$__SCRATCH/"
 
     # Etat final du scratch (aide au debug)
     log ""
     log "Contenu scratch apres calcul :"
-    ls -la "$__SCRATCH/" 2>/dev/null | while IFS= read -r l; do log "  $l"; done
+    _log_dir "$__SCRATCH/"
 
     # Rapatriement explicite (le trap EXIT le ferait aussi, mais on l'appelle
     # ici pour avoir les logs dans l'ordre avant le header FIN).
@@ -839,9 +847,6 @@ STUDY_DIR="."
 COMM="" ; MED="" ; MAIL=""
 PRESET="" ; PARTITION="" ; NODES="" ; NTASKS="" ; CPUS="" ; MEM="" ; TIME_LIMIT=""
 QUIET=false ; RESULTS="" ; KEEP_SCRATCH=0 ; DRY_RUN=0 ; DEBUG=0 ; FOLLOW=0
-
-# Détecter l'appel sans argument pour déclencher le mode interactif
-[ $# -eq 0 ] && _INTERACTIF=1 || _INTERACTIF=0
 
 # ─────────────────────────────────────────────────────────────────
 # Parsing des arguments en ligne de commande
@@ -885,7 +890,7 @@ done
 # Ex: -P moyen -t 8  -> utilise les valeurs de moyen SAUF ntasks=8
 # ─────────────────────────────────────────────────────────────────
 # ── Mode interactif : lancé si aucun argument n'a été fourni ─────────────────
-[ "$_INTERACTIF" = "1" ] && mode_interactif
+[ $# -eq 0 ] && mode_interactif
 
 if [ -n "$PRESET" ]; then
     case "${PRESET,,}" in
@@ -1057,23 +1062,10 @@ EXPORT="${SCRATCH}/${STUDY_NAME}.export"
         IFS=',' read -ra ITEMS <<< "$RESULTS_CLEAN"
         for item in "${ITEMS[@]}"; do
             TYPE="${item%%:*}"; UNIT="${item##*:}"
-            # Correspondance type -> extension de fichier
-            case "$TYPE" in
-                rmed) EXT="rmed" ;; resu) EXT="resu" ;; mess) EXT="mess" ;;
-                csv) EXT="csv" ;; table) EXT="table" ;; dat) EXT="dat" ;;
-                pos) EXT="pos" ;; *) EXT="$TYPE" ;;
-            esac
-            echo "F ${TYPE} ${SCRATCH}/${STUDY_NAME}_u${UNIT}.${EXT} R ${UNIT}"
+            echo "F ${TYPE} ${SCRATCH}/${STUDY_NAME}_u${UNIT}.${TYPE} R ${UNIT}"
         done
     fi
 
-
-    # --------------- RESULTATS SUPPLEMENTAIRES (optionnels) ---------------
-
-    # # Repertoire de sortie libre (REPE_OUT) : certaines commandes Aster
-    # # (ex: IMPR_RESU avec repertoire) ecrivent dans ce dossier.
-    # # "R" en debut de ligne = type repertoire (vs "F" pour fichier).
-    # echo "R ${SCRATCH}/REPE_OUT R 0"
 
 } > "$EXPORT"
 
@@ -1104,7 +1096,7 @@ fi
 # ─────────────────────────────────────────────────────────────────
 _follow_job() {
     local job="$1" logfile="$2"
-    local state="" si=0
+    local state="" spinner_idx=0
     local -a SP=('|' '/' '-' '\')
 
     # ── Attente du passage en RUNNING ────────────────────────────
@@ -1120,8 +1112,8 @@ _follow_job() {
             break
         fi
         printf "\r  %s  %-12s  %s" \
-            "${SP[$si]}" "$state" "(Ctrl+C pour detacher)"
-        si=$(( (si+1) % 4 ))
+            "${SP[$spinner_idx]}" "$state" "(Ctrl+C pour detacher)"
+        spinner_idx=$(( (spinner_idx+1) % 4 ))
         sleep 3
     done
 
@@ -1159,17 +1151,16 @@ _follow_job() {
     echo ""
     section "BILAN JOB $job"
     if [ -d "$dest" ]; then
-        local mess na=0 nf=0 ns=0
+        local mess na nf ns
         mess=$(ls "${dest}"/*.mess 2>/dev/null | head -1 || true)
         if [ -n "$mess" ]; then
             na=$(grep -c "<A>" "$mess" 2>/dev/null || true)
             nf=$(grep -c "<F>" "$mess" 2>/dev/null || true)
             ns=$(grep -c "<S>" "$mess" 2>/dev/null || true)
             if [ "$nf" -eq 0 ] && [ "$ns" -eq 0 ]; then
-                ok "Calcul termine — $na alarme(s)"
+                ok "Calcul terminé — $na alarme(s)"
             else
-                err "Calcul en echec — <F>:$nf  <S>:$ns  <A>:$na"
-                # Affiche les premieres erreurs fatales
+                err "Calcul en échec — <F>:$nf  <S>:$ns  <A>:$na"
                 [ "$nf" -gt 0 ] && grep -B2 -A5 "<F>" "$mess" | head -20
             fi
         fi

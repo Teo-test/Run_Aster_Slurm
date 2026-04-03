@@ -200,17 +200,20 @@ menu_cases() {
     _COCHES=()
     for ((i=0; i<n; i++)); do _COCHES[$i]=0; done
 
-    printf "\n${BOLD}  %s${NC}\n"                                      "$msg" >/dev/tty
-    printf "  ${DIM}(espace : cocher/décocher  —  entrée : valider)${NC}\n" >/dev/tty
+    printf "\n${BOLD}  %s${NC}\n"                                                              "$msg" >/dev/tty
+    printf "  ${DIM}(espace : cocher/décocher  —  a : tout  —  i : inverser  —  entrée : valider)${NC}\n" >/dev/tty
     tput civis >/dev/tty 2>/dev/null
     _dessiner_cases "$sel" "${opts[@]}"
 
     while true; do
         _lire_touche
+        local j
         case "$_TOUCHE" in
             $'\x1b[A') ((sel = (sel - 1 + n) % n)) ;;
             $'\x1b[B') ((sel = (sel + 1) % n))     ;;
             ' ')        ((_COCHES[sel] ^= 1))       ;;   # Toggle
+            'a')        for ((j=0; j<n; j++)); do _COCHES[$j]=1; done ;;   # Tout cocher
+            'i')        for ((j=0; j<n; j++)); do ((_COCHES[j] ^= 1)); done ;; # Inverser
             $'\x0d'|'') break ;;
             $'\x03')
                 tput cnorm >/dev/tty 2>/dev/null
@@ -241,6 +244,100 @@ saisir() {
 }
 
 # ══════════════════════════════════════════
+#  LECTURE DU .comm — détection des sorties
+#
+#  Lit le fichier .comm et remplit $_COMM_OUTPUTS avec les commandes
+#  d'impression trouvées (IMPR_RESU, IMPR_TABLE, DEFI_FICHIER).
+#
+#  Problème des commandes multi-lignes :
+#    Un .comm est du Python ; une même commande peut s'étaler sur
+#    plusieurs lignes entre une parenthèse ouvrante et sa fermante.
+#    Un grep ligne par ligne raterait l'association entre le nom de
+#    la commande et son UNITE= situé sur une autre ligne.
+#
+#  Solution : awk accumule les lignes dans un buffer jusqu'à ce que
+#    le compteur de parenthèses revienne à 0 (bloc complet), puis
+#    émet le bloc aplati sur une seule ligne. Les patterns sont ensuite
+#    cherchés dans ce bloc, qui contient toute la commande.
+#
+#  Format des entrées dans $_COMM_OUTPUTS : "label|type|unite"
+#    label : texte affiché dans le menu
+#    type  : extension pour le .export (rmed, table, resu, dat…)
+#    unite : numéro d'unité logique Fortran
+#
+#  Unités 1, 6, 8, 20, 80 : déjà dans le .export par défaut → ignorées.
+# ══════════════════════════════════════════
+
+_COMM_OUTPUTS=()
+_parse_comm_outputs() {
+    local comm_file="$1"
+    _COMM_OUTPUTS=()
+
+    # ── Aplatissement multi-lignes ─────────────────────────────────
+    # awk lit ligne par ligne, accumule dans buf, et compte les '(' / ')'.
+    # Quand depth revient à 0, le bloc est complet : on l'émet aplati.
+    # Les lignes de commentaires Python (#…) sont ignorées avant comptage
+    # pour éviter des faux déséquilibres du style  # ( commentaire.
+    local flat
+    flat=$(awk '
+    BEGIN { buf=""; depth=0 }
+    /^[[:space:]]*#/ { next }
+    {
+        line = $0
+        gsub(/#.*$/, "", line)          # supprimer commentaires inline
+        buf = buf " " $0                # conserver la ligne originale dans buf
+        for (i=1; i<=length(line); i++) {
+            c = substr(line, i, 1)
+            if (c == "(") depth++
+            else if (c == ")") depth--
+        }
+        if (depth <= 0 && buf ~ /[^[:space:]]/) {
+            print buf
+            buf = ""; depth = 0
+        }
+    }
+    END { if (buf ~ /[^[:space:]]/) print buf }
+    ' "$comm_file" 2>/dev/null)
+
+    # ── Analyse de chaque bloc aplati ──────────────────────────────
+    while IFS= read -r block; do
+        [ -z "$block" ] && continue
+
+        # Extraire UNITE=N (accepte espaces autour du '=')
+        local unite
+        unite=$(echo "$block" | sed -n 's/.*UNITE[[:space:]]*=[[:space:]]*\([0-9]\+\).*/\1/p' | head -1)
+        [ -z "$unite" ] && continue
+
+        # Ignorer les unités standard déjà déclarées dans le .export par défaut
+        case "$unite" in 1|6|8|20|80) continue ;; esac
+
+        local type label
+        if echo "$block" | grep -q "IMPR_RESU"; then
+            if echo "$block" | grep -qE "FORMAT[[:space:]]*=[[:space:]]*['\"]MED['\"]"; then
+                type="rmed"
+                label="IMPR_RESU FORMAT=MED    →  unite $unite  (.rmed)"
+            else
+                type="resu"
+                label="IMPR_RESU              →  unite $unite  (.resu)"
+            fi
+        elif echo "$block" | grep -q "IMPR_TABLE"; then
+            type="table"
+            label="IMPR_TABLE             →  unite $unite  (.table)"
+        elif echo "$block" | grep -q "DEFI_FICHIER"; then
+            # Tenter d'extraire l'extension depuis le nom de fichier déclaré
+            local ext
+            ext=$(echo "$block" | sed -n "s/.*FICHIER[[:space:]]*=[[:space:]]*['\"][^'\"]*\.\([a-zA-Z0-9]*\)['\"].*/\1/p" | head -1)
+            type="${ext:-dat}"
+            label="DEFI_FICHIER           →  unite $unite${ext:+  (.$ext)}"
+        else
+            continue
+        fi
+
+        _COMM_OUTPUTS+=("${label}|${type}|${unite}")
+    done <<< "$flat"
+}
+
+# ══════════════════════════════════════════
 #  MODE INTERACTIF
 #  Lance un wizard de configuration quand le script est appelé sans argument.
 #  Remplit les mêmes variables que le parsing CLI :
@@ -254,6 +351,26 @@ mode_interactif() {
     printf "  ║   Navigation  ↑↓  •  espace  •  entrée   ║\n" >/dev/tty
     printf "  ╚══════════════════════════════════════════╝\n" >/dev/tty
     printf "${NC}\n" >/dev/tty
+
+    # ── 0. Correction des chemins manquants ───────────────────────────────
+    # On ne demande que si le chemin n'existe pas ; s'il existe on ne dérange pas.
+    if [ ! -d "$ASTER_ROOT" ]; then
+        section "Chemin Code_Aster introuvable"
+        warn "ASTER_ROOT = $ASTER_ROOT  (dossier absent)"
+        saisir "Nouveau chemin ASTER_ROOT" "$ASTER_ROOT"
+        ASTER_ROOT="$_SAISIE"
+        [ -d "$ASTER_ROOT" ] && ok "ASTER_ROOT : $ASTER_ROOT" \
+                             || warn "Dossier toujours absent — le calcul peut échouer"
+    fi
+
+    if [ ! -d "$SCRATCH_BASE" ]; then
+        section "Chemin scratch introuvable"
+        warn "SCRATCH_BASE = $SCRATCH_BASE  (dossier absent)"
+        saisir "Nouveau chemin SCRATCH_BASE" "$SCRATCH_BASE"
+        SCRATCH_BASE="$_SAISIE"
+        [ -d "$SCRATCH_BASE" ] && ok "SCRATCH_BASE : $SCRATCH_BASE" \
+                               || warn "Dossier toujours absent — le calcul peut échouer"
+    fi
 
     # ── 1. Dossier d'étude ────────────────────────────────────────────────
     section "Dossier d'étude"
@@ -276,6 +393,45 @@ mode_interactif() {
         STUDY_DIR="$_SAISIE"
     fi
     ok "Dossier : $STUDY_DIR"
+
+    # ── 1b. Sélection des sorties (lecture du .comm) ──────────────────────
+    section "Sorties du calcul"
+    # Chercher le premier .comm dans le dossier sélectionné
+    local _comm_found=""
+    local -a _comm_arr=()
+    shopt -s nullglob; _comm_arr=("${STUDY_DIR}"/*.comm); shopt -u nullglob
+    [ ${#_comm_arr[@]} -ge 1 ] && _comm_found="${_comm_arr[0]}"
+
+    if [ -n "$_comm_found" ]; then
+        info "Lecture : $(basename "$_comm_found")"
+        _parse_comm_outputs "$_comm_found"
+    fi
+
+    if [ ${#_COMM_OUTPUTS[@]} -gt 0 ]; then
+        # Construire le tableau de labels pour le menu
+        local -a _labels=()
+        local _item
+        for _item in "${_COMM_OUTPUTS[@]}"; do
+            _labels+=("${_item%%|*}")
+        done
+        menu_cases "Sorties supplémentaires à inclure :" "${_labels[@]}"
+
+        # Construire RESULTS à partir de la sélection
+        local _sel_results="" _idx
+        for _idx in "${_MENU_ITEMS[@]}"; do
+            _item="${_COMM_OUTPUTS[$_idx]}"
+            local _type="${_item#*|}"    # supprimer label|
+            _type="${_type%%|*}"         # garder type (avant dernier |)
+            local _unite="${_item##*|}"  # après le dernier |
+            [ -n "$_sel_results" ] && _sel_results+=","
+            _sel_results+="${_type}:${_unite}"
+        done
+        [ -n "$_sel_results" ] && RESULTS="$_sel_results"
+    else
+        [ -n "$_comm_found" ] && \
+            info "Aucune sortie supplémentaire détectée dans le .comm"
+        info "Les sorties par défaut seront générées (.mess, .resu, .rmed unite 80)"
+    fi
 
     # ── 2. Preset de ressources ───────────────────────────────────────────
     section "Ressources Slurm"

@@ -142,7 +142,7 @@ _dessiner_cases() {
     local i marq
     for ((i=0; i<${#opts[@]}; i++)); do
         ((i == sel)) && marq="${CYAN}${BOLD}❯${NC}" || marq=" "
-        if ((_COCHES[i] == 1)); then
+        if [ "${_COCHES[$i]}" = "1" ]; then
             printf "  %b [${GREEN}✔${NC}] %-51s\n" "$marq" "${opts[$i]}" >/dev/tty
         else
             printf "  %b [ ] %-51s\n"               "$marq" "${opts[$i]}" >/dev/tty
@@ -164,10 +164,10 @@ menu_fleches() {
     while true; do
         _lire_touche
         case "$_TOUCHE" in
-            $'\x1b[A') ((sel = (sel - 1 + n) % n)) ;;   # Flèche haut
-            $'\x1b[B') ((sel = (sel + 1) % n))     ;;   # Flèche bas
-            $'\x0d'|'') break ;;                         # Entrée
-            $'\x03')                                      # Ctrl+C
+            $'\x1b[A') sel=$(( (sel - 1 + n) % n )) ;;   # Flèche haut
+            $'\x1b[B') sel=$(( (sel + 1) % n ))     ;;   # Flèche bas
+            $'\x0d'|'') break ;;                          # Entrée
+            $'\x03')                                       # Ctrl+C
                 tput cnorm >/dev/tty 2>/dev/null
                 printf "\n" >/dev/tty
                 _MENU_IDX=-1; return ;;
@@ -209,11 +209,11 @@ menu_cases() {
         _lire_touche
         local j
         case "$_TOUCHE" in
-            $'\x1b[A') ((sel = (sel - 1 + n) % n)) ;;
-            $'\x1b[B') ((sel = (sel + 1) % n))     ;;
-            ' ')        ((_COCHES[sel] ^= 1))       ;;   # Toggle
+            $'\x1b[A') sel=$(( (sel - 1 + n) % n )) ;;
+            $'\x1b[B') sel=$(( (sel + 1) % n ))     ;;
+            ' ')        _COCHES[$sel]=$(( _COCHES[sel] ^ 1 ))       ;;   # Toggle
             'a')        for ((j=0; j<n; j++)); do _COCHES[$j]=1; done ;;   # Tout cocher
-            'i')        for ((j=0; j<n; j++)); do ((_COCHES[j] ^= 1)); done ;; # Inverser
+            'i')        for ((j=0; j<n; j++)); do _COCHES[$j]=$(( _COCHES[j] ^ 1 )); done ;; # Inverser
             $'\x0d'|'') break ;;
             $'\x03')
                 tput cnorm >/dev/tty 2>/dev/null
@@ -848,6 +848,10 @@ COMM="" ; MED="" ; MAIL=""
 PRESET="" ; PARTITION="" ; NODES="" ; NTASKS="" ; CPUS="" ; MEM="" ; TIME_LIMIT=""
 QUIET=false ; RESULTS="" ; KEEP_SCRATCH=0 ; DRY_RUN=0 ; DEBUG=0 ; FOLLOW=0
 
+# Sauvegarder le nombre d'arguments AVANT la boucle de parsing
+# (les shift le consomment, donc $# vaut 0 après)
+_NARGS=$#
+
 # ─────────────────────────────────────────────────────────────────
 # Parsing des arguments en ligne de commande
 #
@@ -890,7 +894,7 @@ done
 # Ex: -P moyen -t 8  -> utilise les valeurs de moyen SAUF ntasks=8
 # ─────────────────────────────────────────────────────────────────
 # ── Mode interactif : lancé si aucun argument n'a été fourni ─────────────────
-[ $# -eq 0 ] && mode_interactif
+[ "$_NARGS" -eq 0 ] && mode_interactif
 
 if [ -n "$PRESET" ]; then
     case "${PRESET,,}" in

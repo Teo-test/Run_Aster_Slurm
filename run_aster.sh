@@ -158,7 +158,7 @@ menu_fleches() {
     local sel=0
 
     printf "\n${BOLD}  %s${NC}\n" "$msg" >/dev/tty
-    tput civis >/dev/tty 2>/dev/null
+    tput civis >/dev/tty 2>/dev/null || true
     _dessiner_menu "$sel" "${opts[@]}"
 
     while true; do
@@ -166,9 +166,9 @@ menu_fleches() {
         case "$_TOUCHE" in
             $'\x1b[A') sel=$(( (sel - 1 + n) % n )) ;;   # Flèche haut
             $'\x1b[B') sel=$(( (sel + 1) % n ))     ;;   # Flèche bas
-            $'\x0d'|'') break ;;                          # Entrée
+            $'\x0d'|$'\x0a'|'') break ;;                   # Entrée (CR, LF, ou vide)
             $'\x03')                                       # Ctrl+C
-                tput cnorm >/dev/tty 2>/dev/null
+                tput cnorm >/dev/tty 2>/dev/null || true
                 printf "\n" >/dev/tty
                 _MENU_IDX=-1; return ;;
         esac
@@ -186,7 +186,7 @@ menu_fleches() {
             printf "\033[2K\r\033[1B" >/dev/tty   # effacer + descendre sans imprimer
         fi
     done
-    tput cnorm >/dev/tty 2>/dev/null
+    tput cnorm >/dev/tty 2>/dev/null || true
     _MENU_IDX="$sel"
 }
 
@@ -202,7 +202,7 @@ menu_cases() {
 
     printf "\n${BOLD}  %s${NC}\n"                                                              "$msg" >/dev/tty
     printf "  ${DIM}(espace : cocher/décocher  —  a : tout  —  i : inverser  —  entrée : valider)${NC}\n" >/dev/tty
-    tput civis >/dev/tty 2>/dev/null
+    tput civis >/dev/tty 2>/dev/null || true
     _dessiner_cases "$sel" "${opts[@]}"
 
     while true; do
@@ -214,9 +214,9 @@ menu_cases() {
             ' ')        _COCHES[$sel]=$(( _COCHES[sel] ^ 1 ))       ;;   # Toggle
             'a')        for ((j=0; j<n; j++)); do _COCHES[$j]=1; done ;;   # Tout cocher
             'i')        for ((j=0; j<n; j++)); do _COCHES[$j]=$(( _COCHES[j] ^ 1 )); done ;; # Inverser
-            $'\x0d'|'') break ;;
+            $'\x0d'|$'\x0a'|'') break ;;
             $'\x03')
-                tput cnorm >/dev/tty 2>/dev/null
+                tput cnorm >/dev/tty 2>/dev/null || true
                 printf "\n" >/dev/tty
                 _MENU_ITEMS=(); return ;;
         esac
@@ -224,7 +224,7 @@ menu_cases() {
         _dessiner_cases "$sel" "${opts[@]}"
     done
 
-    tput cnorm >/dev/tty 2>/dev/null
+    tput cnorm >/dev/tty 2>/dev/null || true
     _MENU_ITEMS=()
     for ((i=0; i<n; i++)); do
         [ "${_COCHES[$i]}" = "1" ] && _MENU_ITEMS+=("$i")
@@ -832,16 +832,14 @@ fi
 #
 # ##########################################################################
 
-# set -euo pipefail : mode strict pour la Phase 1
-#   -e : arret immediat si une commande echoue
-#   -u : erreur si variable non definie
-#   -o pipefail : echec du pipe si l'une des commandes echoue
-set -euo pipefail
-
 # ─────────────────────────────────────────────────────────────────
 # Initialisation des variables d'arguments
 # Toutes les variables sont initialisees a vide ou a leur valeur par
 # defaut pour eviter les erreurs "variable non definie" avec set -u.
+# NOTE : set -euo pipefail est active APRES le mode interactif pour
+#        eviter que les expressions arithmetiques bash (exit code 1
+#        quand le resultat vaut 0) ou les commandes tput ne tuent
+#        silencieusement le script.
 # ─────────────────────────────────────────────────────────────────
 STUDY_DIR="."
 COMM="" ; MED="" ; MAIL=""
@@ -894,7 +892,19 @@ done
 # Ex: -P moyen -t 8  -> utilise les valeurs de moyen SAUF ntasks=8
 # ─────────────────────────────────────────────────────────────────
 # ── Mode interactif : lancé si aucun argument n'a été fourni ─────────────────
+# IMPORTANT : mode_interactif doit être appelé AVANT set -euo pipefail car :
+#   - Les expressions arithmetiques bash ((i == sel)) retournent exit code 1
+#     quand le resultat vaut 0 (meme probleme que (( count++ )) avec count=0)
+#   - tput civis/cnorm peut echouer si TERM n'est pas bien defini
+#   - Sous set -e, n'importe laquelle de ces situations tue le script
+#     silencieusement sans message d'erreur
 [ "$_NARGS" -eq 0 ] && mode_interactif
+
+# set -euo pipefail : mode strict pour la Phase 1 (active APRES le mode interactif)
+#   -e : arret immediat si une commande echoue
+#   -u : erreur si variable non definie
+#   -o pipefail : echec du pipe si l'une des commandes echoue
+set -euo pipefail
 
 if [ -n "$PRESET" ]; then
     case "${PRESET,,}" in

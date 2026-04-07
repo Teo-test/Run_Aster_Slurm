@@ -141,7 +141,7 @@ _dessiner_cases() {
     local opts=("$@")
     local i marq
     for ((i=0; i<${#opts[@]}; i++)); do
-        ((i == sel)) && marq="${CYAN}${BOLD}❯${NC}" || marq=" "
+        [ "$i" -eq "$sel" ] && marq="${CYAN}${BOLD}❯${NC}" || marq=" "
         if [ "${_COCHES[$i]}" = "1" ]; then
             printf "  %b [${GREEN}✔${NC}] %-51s\n" "$marq" "${opts[$i]}" >/dev/tty
         else
@@ -227,7 +227,7 @@ menu_cases() {
     tput cnorm >/dev/tty 2>/dev/null
     _MENU_ITEMS=()
     for ((i=0; i<n; i++)); do
-        ((_COCHES[i] == 1)) && _MENU_ITEMS+=("$i")
+        [ "${_COCHES[$i]}" = "1" ] && _MENU_ITEMS+=("$i")
     done
 }
 
@@ -1128,7 +1128,7 @@ _follow_job() {
         # Attendre l'apparition du fichier log (max 30 s)
         local t=0
         while ! [ -f "$logfile" ] && [ "$t" -lt 30 ]; do
-            sleep 1; (( t++ ))
+            sleep 1; t=$((t + 1))
         done
         [ -f "$logfile" ] || warn "Fichier log introuvable : $logfile"
 

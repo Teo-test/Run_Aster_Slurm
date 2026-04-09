@@ -8,10 +8,12 @@ Ensemble d'outils pour soumettre des calculs **Code_Aster** via **Slurm** et exp
 
 | Outil | Commande de lancement |
 |---|---|
-| Soumettre un calcul| `bash run_aster.sh` |
+| Soumettre un calcul | `bash run_aster.sh` |
 | Soumettre un calcul (CLI) | `bash run_aster.sh [OPTIONS] DOSSIER/` |
+| Analyser un `.resu` | `bash Outil_annexes/parse_resu.sh` |
+| Analyser un `.resu` (CLI) | `bash Outil_annexes/parse_resu.sh [OPTIONS] FICHIER.resu` |
 | Comparer des CSV | `python Outil_annexes/comparecsv_v3.py [fichiers.csv ...]` |
-| Extraire des graphes PPTX| `python Outil_annexes/pptx_chart_extractor_v2.py [fichier.pptx]` |
+| Extraire des graphes PPTX | `python Outil_annexes/pptx_chart_extractor_v2.py [fichier.pptx]` |
 
 > **Navigation commune aux outils Python** :
 > - `↑↓` pour naviguer
@@ -68,8 +70,9 @@ bash run_aster.sh [OPTIONS] [DOSSIER_ETUDE]
 | `-C, --comm FILE` | Fichier `.comm` (auto-détecté si absent) |
 | `-M, --med  FILE` | Maillage MED (auto-détecté si absent) |
 | `-A, --mail FILE` | Maillage ASTER natif (auto-détecté si absent) |
+| `-B, --base DIR`  | Dossier de base pour **POURSUITE** (contient `glob.*` / `pick.*`) |
 
-Les fichiers `.py`, `.dat`, `.para`, `.include`, `.mfront` présents dans le dossier sont copiés automatiquement dans le scratch.
+Les fichiers `.py`, `.dat`, `.para`, `.include`, `.mfront` présents dans le dossier sont copiés automatiquement dans le scratch. Les fichiers `glob.*` / `pick.*` / `vola.*` du dossier `-B` (ou auto-détectés dans le dossier d'étude) sont également copiés.
 
 #### Ressources Slurm
 
@@ -111,12 +114,13 @@ Dans le `.comm` : `IMPR_RESU(UNITE=81, ...)` / `IMPR_TABLE(UNITE=38, ...)`
 
 | Option | Description |
 |---|---|
-| `-f, --follow`   | Suit le job : spinner PENDING → `tail -f` automatique en RUNNING → bilan final. `Ctrl+C` détache sans annuler. |
-| `-q, --quiet`    | Sortie minimale — affiche uniquement le job ID (utile pour scripts) |
-| `--keep-scratch` | Conserve le scratch après le calcul (utile pour debug) |
-| `--dry-run`      | Affiche la commande `sbatch` sans la lancer |
-| `--debug`        | Active `set -x` sur le nœud de calcul |
-| `-h, --help`     | Affiche l'aide |
+| `-f, --follow`    | Suit le job : spinner PENDING → `tail -f` automatique en RUNNING → bilan final. `Ctrl+C` détache sans annuler. |
+| `-q, --quiet`     | Sortie minimale — affiche uniquement le job ID (utile pour scripts) |
+| `--keep-scratch`  | Conserve le scratch après le calcul (utile pour debug) |
+| `--dry-run`       | Affiche la commande `sbatch` sans la lancer |
+| `--no-validate`   | Désactive la validation du `.comm` avant soumission |
+| `--debug`         | Active `set -x` sur le nœud de calcul |
+| `-h, --help`      | Affiche l'aide |
 
 ### Exemples
 
@@ -132,6 +136,9 @@ bash run_aster.sh -P moyen -t 8 -m 16G mon_etude/
 
 # Résultats supplémentaires
 bash run_aster.sh -P moyen -R "rmed:81,csv:38" mon_etude/
+
+# Calcul en poursuite (POURSUITE) avec base explicite
+bash run_aster.sh -P moyen -B mon_etude_thermo/run_12345 mon_etude_meca/
 
 # Suivre le job en temps réel
 bash run_aster.sh -P court -f mon_etude/
@@ -184,6 +191,81 @@ tail -f mon_etude/aster_<JOB_ID>.out
 ls mon_etude/latest/
 scancel <JOB_ID>    # annule — rapatriement automatique déclenché
 ```
+
+---
+
+## `parse_resu.sh` — Analyse des fichiers `.resu` Code_Aster
+
+Navigation par flèches identique à `run_aster.sh`. Aucune dépendance externe (bash + awk).
+
+### Lancement
+
+```bash
+# Mode interactif (détection auto des .resu dans le dossier courant)
+bash Outil_annexes/parse_resu.sh
+
+# Sur un fichier ou un dossier précis
+bash Outil_annexes/parse_resu.sh mon_etude/run_12345/calcul.resu
+bash Outil_annexes/parse_resu.sh mon_etude/run_12345/
+```
+
+### Mode interactif — étapes
+
+1. **Sélection du fichier** `.resu` (menu flèches si plusieurs trouvés, profondeur 3)
+2. **Scan automatique** → tableau récapitulatif des blocs : champ, numéro d'ordre, instant, localisation
+3. **Sélection des blocs** à traiter (cases à cocher)
+4. **Action** → Export CSV / Statistiques / Affichage terminal / Les deux
+5. **Dossier de sortie** (si export CSV)
+
+### Mode CLI
+
+| Option | Description |
+|---|---|
+| `-f, --field NOM`  | Filtrer sur un champ (`DEPL`, `SIEF_ELNO`, `EQUI_ELNO`…) |
+| `-o, --ordre N`    | Filtrer sur un numéro d'ordre (0 = tous) |
+| `-a, --all`        | Exporter tous les blocs en CSV |
+| `--stats`          | Afficher statistiques min/max/moy (sans CSV) |
+| `--csv`            | Forcer l'export CSV (un fichier par bloc) |
+| `-O, --outdir DIR` | Dossier de sortie (défaut : même dossier que le `.resu`) |
+| `-q, --quiet`      | Sortie minimale |
+
+### Exemples CLI
+
+```bash
+# Export CSV du champ DEPL (tous les instants)
+bash Outil_annexes/parse_resu.sh -f DEPL --csv calcul.resu
+
+# Statistiques sur les contraintes
+bash Outil_annexes/parse_resu.sh --stats -f SIEF_ELNO calcul.resu
+
+# Tout exporter vers un dossier dédié
+bash Outil_annexes/parse_resu.sh --all -O ./resultats/ mon_etude/run_12345/
+
+# Un ordre précis
+bash Outil_annexes/parse_resu.sh -f DEPL -o 3 --csv calcul.resu
+```
+
+### Format des fichiers produits
+
+Un CSV par bloc sélectionné, nommé `CHAMP_ordN_instX.csv` :
+
+```
+NOEUD,DX,DY,DZ
+N1,0.000000E+00,0.000000E+00,0.000000E+00
+N2,5.461820E-05,9.945110E-07,-6.324510E-07
+```
+
+| Localisation | Colonnes identifiant |
+|---|---|
+| `NOEU` (nœuds) | `NOEUD` |
+| `ELNO` (nœuds par élément) | `MAILLE, NOEUD` |
+| `ELGA` (points de Gauss) | `MAILLE, POINT` |
+
+### Limites connues (v1.0)
+
+- Blocs avec **wrapping de colonnes** (>6 composantes) : seul le premier groupe de colonnes est extrait
+- Format **`IMPR_TABLE`** (colonnes libres) : non pris en charge
+- Blocs **`ELGA SOUS_POINT`** : support partiel
 
 ---
 

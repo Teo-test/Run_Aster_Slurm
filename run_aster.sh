@@ -41,6 +41,7 @@ DEFAULT_TIME="05:00:00"
 
 # Presets
 declare -A PRESET_PARTITION=([court]="court"  [moyen]="normal" [long]="long")
+declare -A PRESET_NODES=(    [court]=1        [moyen]=1        [long]=1)
 declare -A PRESET_NTASKS=(   [court]=1        [moyen]=1        [long]=1)
 declare -A PRESET_MEM=(      [court]="2G"     [moyen]="20G"    [long]="50G")
 declare -A PRESET_TIME=(     [court]="05:00:00" [moyen]="03-00:00:00" [long]="30-00:00:00")
@@ -212,7 +213,7 @@ _flatten_comm() {
     /^[[:space:]]*#/ { next }
     {
         line = $0; gsub(/#.*$/, "", line)
-        buf = buf " " $0
+        buf = buf " " line
         for (i=1; i<=length(line); i++) {
             c = substr(line, i, 1)
             if (c == "(") depth++
@@ -310,7 +311,7 @@ _validate_comm() {
         [ ${#bases[@]} -gt 0 ] && has_base=1
         if [ "$has_base" -eq 0 ]; then
             warn "Le .comm contient POURSUITE mais aucune base (glob.*/pick.*) trouvee dans $study_dir"
-            warn "  → Le calcul va probablement echouer. Utilisez -B pour specifier le dossier base."
+            warn "  → Le calcul va probablement echouer. Utilisez -B/--base pour specifier le dossier base."
         else
             ok "POURSUITE : base trouvee (${#bases[@]} fichiers)"
         fi
@@ -417,7 +418,7 @@ _auto_detect_results() {
         local _type="${item#*|}"; _type="${_type%%|*}"
         local _unite="${item##*|}"
         # Verifier si deja dans RESULTS
-        if [ -n "$RESULTS" ] && echo "$RESULTS" | grep -q ":${_unite}"; then
+        if [ -n "$RESULTS" ] && echo "$RESULTS," | grep -q ":${_unite},"; then
             continue
         fi
         [ -n "$auto_results" ] && auto_results+=","
@@ -476,6 +477,15 @@ mode_interactif() {
         STUDY_DIR="$_SAISIE"
     fi
     ok "Dossier : $STUDY_DIR"
+
+    # ── Base de poursuite ─────────────────────────────────────────
+    local _comm_for_base
+    _comm_for_base=$(_find_first "$STUDY_DIR" "*.comm")
+    if [ -n "$_comm_for_base" ] && grep -q "POURSUITE" "$_comm_for_base" 2>/dev/null; then
+        section "Base de poursuite (POURSUITE détecté dans le .comm)"
+        saisir "Dossier contenant la base (glob.*/pick.*) — vide pour auto-detection" ""
+        [ -n "$_SAISIE" ] && BASE_DIR="$_SAISIE"
+    fi
 
     # ── Sorties du calcul ─────────────────────────────────────────
     section "Sorties du calcul"
@@ -567,6 +577,7 @@ FICHIERS
   -C, --comm FILE       Fichier .comm (auto-detecte si absent)
   -M, --med  FILE       Fichier .med  (auto-detecte si absent)
   -A, --mail FILE       Fichier .mail (auto-detecte si absent)
+  -B, --base DIR        Dossier contenant la base de poursuite (glob.*/pick.*)
 
 RESULTATS SUPPLEMENTAIRES
   -R, --results LIST    Format "type:unite,..." (ex: "rmed:81,csv:38")
@@ -693,7 +704,7 @@ if [ "${__RUN_PHASE:-}" = "EXEC" ]; then
     header "VERIFICATION"
     log "Contenu scratch :"; _log_dir "$__SCRATCH/"
     log "Contenu .export :"
-    cat "$__EXPORT" 2>/dev/null | while IFS= read -r l; do log "  $l"; done
+    while IFS= read -r l; do log "  $l"; done < "$__EXPORT"
 
     # ── Calcul ────────────────────────────────────────────────────
     header "CALCUL"
@@ -734,7 +745,7 @@ fi
 #
 # ##########################################################################
 
-STUDY_DIR="."; COMM=""; MED=""; MAIL=""
+STUDY_DIR="."; COMM=""; MED=""; MAIL=""; BASE_DIR=""
 PRESET=""; PARTITION=""; NODES=""; NTASKS=""; CPUS=""; MEM=""; TIME_LIMIT=""
 QUIET=false; RESULTS=""; KEEP_SCRATCH=0; DRY_RUN=0; DEBUG=0; FOLLOW=0
 NO_VALIDATE=0
@@ -746,6 +757,7 @@ while [ $# -gt 0 ]; do
         -C|--comm)      COMM="$2";        shift 2 ;;
         -M|--med)       MED="$2";         shift 2 ;;
         -A|--mail)      MAIL="$2";        shift 2 ;;
+        -B|--base)      BASE_DIR="$2";    shift 2 ;;
         -R|--results)   RESULTS="$2";     shift 2 ;;
         -P|--preset)    PRESET="$2";      shift 2 ;;
         -p|--partition) PARTITION="$2";   shift 2 ;;
@@ -781,6 +793,7 @@ if [ -n "$PRESET" ]; then
         *) err "Preset inconnu : $PRESET"; exit 1 ;;
     esac
     : "${PARTITION:=${PRESET_PARTITION[$local_preset]}}"
+    : "${NODES:=${PRESET_NODES[$local_preset]}}"
     : "${NTASKS:=${PRESET_NTASKS[$local_preset]}}"
     : "${MEM:=${PRESET_MEM[$local_preset]}}"
     : "${TIME_LIMIT:=${PRESET_TIME[$local_preset]}}"
@@ -797,6 +810,11 @@ $QUIET || section "Detection des fichiers"
 STUDY_DIR="$(realpath "$STUDY_DIR")"
 STUDY_NAME="$(basename "$STUDY_DIR")"
 [ -d "$STUDY_DIR" ] || { err "Dossier introuvable : $STUDY_DIR"; exit 1; }
+if [[ "$STUDY_NAME" =~ [,=\ ] ]]; then
+    err "Le nom du dossier ne peut pas contenir de virgule, espace ou '=' : '$STUDY_NAME'"
+    err "  (Ces caractères cassent le mécanisme --export de sbatch)"
+    exit 1
+fi
 
 # .comm (obligatoire)
 if [ -z "$COMM" ]; then
@@ -824,8 +842,13 @@ if [ -z "$RESULTS" ]; then
 fi
 
 # ── Validation du .comm ──────────────────────────────────────
-if [ "$NO_VALIDATE" -eq 0 ] && ! $QUIET; then
-    if ! _validate_comm "$COMM" "$STUDY_DIR" "$MED" "$MAIL" "$RESULTS"; then
+if [ "$NO_VALIDATE" -eq 0 ]; then
+    if $QUIET; then
+        _validate_comm "$COMM" "$STUDY_DIR" "$MED" "$MAIL" "$RESULTS" >/dev/null || {
+            err "Validation du .comm echouee — utilisez --no-validate pour forcer la soumission"
+            exit 1
+        }
+    elif ! _validate_comm "$COMM" "$STUDY_DIR" "$MED" "$MAIL" "$RESULTS"; then
         err "Validation du .comm echouee — corrigez les erreurs ci-dessus"
         err "  Utilisez --no-validate pour forcer la soumission"
         exit 1
@@ -849,15 +872,38 @@ for f in "$STUDY_DIR"/*.py "$STUDY_DIR"/*.dat "$STUDY_DIR"/*.para \
 done
 shopt -u nullglob
 
+# ── Copie de la base (POURSUITE) ──────────────────────────────
+_BASE_SRC="${BASE_DIR:-}"
+if [ -z "$_BASE_SRC" ]; then
+    shopt -s nullglob
+    _base_check=("$STUDY_DIR"/glob.* "$STUDY_DIR"/pick.* "$STUDY_DIR"/vola.*)
+    shopt -u nullglob
+    [ ${#_base_check[@]} -gt 0 ] && _BASE_SRC="$STUDY_DIR"
+fi
+if [ -n "$_BASE_SRC" ]; then
+    [ -d "$_BASE_SRC" ] || { err "Dossier base introuvable : $_BASE_SRC"; exit 1; }
+    shopt -s nullglob
+    for f in "$_BASE_SRC"/glob.* "$_BASE_SRC"/pick.* "$_BASE_SRC"/vola.*; do
+        cp -a "$f" "$SCRATCH/"
+    done
+    shopt -u nullglob
+    $QUIET || ok "Base : $_BASE_SRC → scratch"
+fi
+
 # ── Conversion memoire / duree ────────────────────────────────
 MEM_MB=$(echo "$MEM" | awk '
     tolower($0) ~ /g$/ { gsub(/[gGiI]/,""); print int($0*1024); next }
     tolower($0) ~ /m$/ { gsub(/[mMiI]/,""); print int($0);      next }
     /^[0-9]+$/          { print int($0); next }
     { print -1 }')
-[ "$MEM_MB" -le 0 ] 2>/dev/null && { err "Memoire invalide : $MEM"; exit 1; }
+[ "$MEM_MB" -le 0 ] && { err "Memoire invalide : $MEM"; exit 1; }
 ASTER_MEM=$(( MEM_MB - 512 ))
-[ "$ASTER_MEM" -lt 512 ] && ASTER_MEM=512
+if [ "$ASTER_MEM" -lt 512 ]; then
+    ASTER_MEM=512
+    warn "Mémoire très limitée : Aster fixé au minimum (512 MB) — risque d'erreur mémoire"
+elif [ "$ASTER_MEM" -lt 1024 ]; then
+    $QUIET || warn "Mémoire Aster faible (${ASTER_MEM} MB) — risque pour les gros modèles"
+fi
 
 TIME_SEC=$(echo "$TIME_LIMIT" | awk -F'[-:]' '
     NF==4 {print $1*86400+$2*3600+$3*60+$4; next}
@@ -926,14 +972,24 @@ _follow_job() {
         echo ""
         local t=0
         while ! [ -f "$logfile" ] && [ "$t" -lt 30 ]; do sleep 1; t=$((t + 1)); done
-        [ -f "$logfile" ] || warn "Fichier log introuvable : $logfile"
 
-        tail -f "$logfile" &
-        local TAIL_PID=$!
-        # shellcheck disable=SC2064
-        trap "kill $TAIL_PID 2>/dev/null; echo ''; info 'Detache — job $job toujours en cours'; exit 0" INT
-        while squeue -j "$job" -h &>/dev/null; do sleep 5; done
-        sleep 2; kill $TAIL_PID 2>/dev/null; wait $TAIL_PID 2>/dev/null; trap - INT
+        if ! squeue -j "$job" -h &>/dev/null; then
+            # Job terminé pendant l'attente du fichier log — affichage direct
+            if [ -f "$logfile" ]; then
+                cat "$logfile"
+            else
+                warn "Fichier log introuvable : $logfile"
+            fi
+            state=""
+        else
+            [ -f "$logfile" ] || warn "Fichier log introuvable : $logfile"
+            tail -f "$logfile" &
+            local TAIL_PID=$!
+            # shellcheck disable=SC2064
+            trap "kill $TAIL_PID 2>/dev/null; echo ''; info 'Detache — job $job toujours en cours'; exit 0" INT
+            while squeue -j "$job" -h &>/dev/null; do sleep 5; done
+            sleep 2; kill $TAIL_PID 2>/dev/null; wait $TAIL_PID 2>/dev/null; trap - INT
+        fi
     fi
 
     # Bilan

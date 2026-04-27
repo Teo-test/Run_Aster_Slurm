@@ -1,0 +1,334 @@
+"""
+================================================================================
+  CODE_ASTER – CHEATSHEET EXTRACTION DE RÉSULTATS
+  Fichier .comm : code Python exécuté dans l'environnement Code_Aster
+  Les blocs '# [ASTER]' montrent les commandes DSL à écrire dans le .comm
+  Les blocs Python sont utilisables directement via EXEC_LOGICIEL/embedded
+================================================================================
+  SOMMAIRE
+    0.  Pré-requis & imports
+    1.  Accès aux paramètres d'un résultat
+    2.  Extraction de champs par NUME_ORDRE ou INST
+    3.  Champs courants et leurs formes numpy
+    4.  Calculs mécaniques (Von Mises, principales, Tresca, déformation éq.)
+    5.  Extraction sur un groupe de nœuds / mailles
+    6.  Commandes DSL : CALC_CHAMP, POST_RELEVE_T, IMPR_RESU, IMPR_TABLE
+    7.  Métriques d'erreur (L1, L2, L∞, RMSE, Biais)
+    8.  Export CSV / TXT (mode append pour études paramétriques)
+================================================================================
+"""
+
+import numpy as np
+import os
+import csv
+
+# ==============================================================================
+# 0. PRÉ-REQUIS
+#    Ces variables sont supposées définies en amont dans le .comm :
+#      resu_ref  – objet RESULTAT de référence
+#      resu_md   – objet RESULTAT modifié/étudié
+#      valeur_param – float, paramètre courant de l'étude
+# ==============================================================================
+
+# ==============================================================================
+# 1. ACCÈS AUX PARAMÈTRES D'UN RÉSULTAT
+# ==============================================================================
+
+params = resu_ref.getAccessParameters()
+# Clés disponibles selon le type de calcul :
+#   'NUME_ORDRE'  – numéros d'ordre (int)
+#   'INST'        – instants de calcul (float, transitoire)
+#   'FREQ'        – fréquences (float, modal/harmonique)
+#   'MODE'        – numéros de mode (modal)
+#   'NOEUD_CMP'   – paires (noeud, composante) pour certains champs
+print(params.keys())
+
+instants  = params['INST']          # liste des instants
+numeros   = params['NUME_ORDRE']    # liste des numéros d'ordre associés
+
+# Dernier pas
+num_ref = int(params['NUME_ORDRE'][-1])
+num_md  = int(resu_md.getAccessParameters()['NUME_ORDRE'][-1])
+
+# Accès par instant précis
+def num_depuis_inst(resu, inst_cible):
+    p = resu.getAccessParameters()
+    idx = p['INST'].index(inst_cible)
+    return int(p['NUME_ORDRE'][idx])
+
+# Accès au plus proche instant
+def num_plus_proche(resu, inst_cible):
+    p = resu.getAccessParameters()
+    insts = np.array(p['INST'])
+    idx   = int(np.argmin(np.abs(insts - inst_cible)))
+    return int(p['NUME_ORDRE'][idx])
+
+# ==============================================================================
+# 2. EXTRACTION DE CHAMPS EN NUMPY
+# ==============================================================================
+
+# Déplacements : (N_noeuds, 3)  →  [DX, DY, DZ]
+dep_ref = np.array(resu_ref.getField('DEPL', num_ref).getValues()).reshape(-1, 3)
+dep_md  = np.array(resu_md .getField('DEPL', num_md ).getValues()).reshape(-1, 3)
+
+# Contraintes nodales : (N_noeuds, 6)  →  [Sxx, Syy, Szz, Sxy, Sxz, Syz]
+sig_ref = np.array(resu_ref.getField('SIGM_NOEU', num_ref).getValues()).reshape(-1, 6)
+sig_md  = np.array(resu_md .getField('SIGM_NOEU', num_md ).getValues()).reshape(-1, 6)
+
+# ==============================================================================
+# 3. CHAMPS COURANTS ET LEURS FORMES NUMPY
+# ==============================================================================
+#
+#  Nom             reshape      Composantes
+#  ─────────────────────────────────────────────────────────────────────────────
+#  DEPL            (-1, 3)      DX  DY  DZ
+#  VITE            (-1, 3)      DX  DY  DZ
+#  ACCE            (-1, 3)      DX  DY  DZ
+#  REAC_NODA       (-1, 3)      DX  DY  DZ
+#  FORC_NODA       (-1, 3)      DX  DY  DZ
+#  TEMP            (-1,)        TEMP            (scalaire)
+#  FLUX_NOEU       (-1, 3)      FX  FY  FZ
+#  SIGM_NOEU       (-1, 6)      Sxx Syy Szz Sxy Sxz Syz
+#  SIEF_ELGA       (-1, 6)      idem  (pts de Gauss)
+#  EPSI_NOEU       (-1, 6)      Exx Eyy Ezz Exy Exz Eyz
+#  EPSP_NOEU       (-1, 6)      déformation plastique
+#  VARI_NOEU       (-1, N_var)  variables internes (N_var dépend du matériau)
+#  ─────────────────────────────────────────────────────────────────────────────
+
+def extraire(resu, nom_champ, num_ordre, n_cmp):
+    """Extrait un champ en tableau numpy (n_noeuds, n_cmp)."""
+    vals = np.array(resu.getField(nom_champ, num_ordre).getValues())
+    return vals.reshape(-1, n_cmp) if n_cmp > 1 else vals
+
+# Exemples
+temp = extraire(resu_ref, 'TEMP',      num_ref, 1)   # (N,)
+flux = extraire(resu_ref, 'FLUX_NOEU', num_ref, 3)   # (N, 3)
+epsi = extraire(resu_ref, 'EPSI_NOEU', num_ref, 6)   # (N, 6)
+
+# ==============================================================================
+# 4. CALCULS MÉCANIQUES COURANTS
+# ==============================================================================
+
+# --- Von Mises ----------------------------------------------------------------
+def von_mises(sig):
+    """σ_vm = √[½·((Sxx-Syy)²+(Syy-Szz)²+(Szz-Sxx)²) + 3·(Sxy²+Sxz²+Syz²)]"""
+    sxx, syy, szz = sig[:, 0], sig[:, 1], sig[:, 2]
+    sxy, sxz, syz = sig[:, 3], sig[:, 4], sig[:, 5]
+    return np.sqrt(0.5 * (
+        (sxx - syy)**2 + (syy - szz)**2 + (szz - sxx)**2
+        + 6 * (sxy**2 + sxz**2 + syz**2)
+    ))
+
+# --- Contraintes principales (σ1 ≥ σ2 ≥ σ3) ----------------------------------
+def contraintes_principales(sig):
+    """Retourne (s1, s2, s3) triées dans l'ordre décroissant."""
+    n = sig.shape[0]
+    s1, s2, s3 = np.empty(n), np.empty(n), np.empty(n)
+    for i in range(n):
+        T = np.array([
+            [sig[i, 0], sig[i, 3], sig[i, 4]],
+            [sig[i, 3], sig[i, 1], sig[i, 5]],
+            [sig[i, 4], sig[i, 5], sig[i, 2]],
+        ])
+        v = np.sort(np.linalg.eigvalsh(T))[::-1]
+        s1[i], s2[i], s3[i] = v
+    return s1, s2, s3
+
+# --- Tresca ------------------------------------------------------------------
+def tresca(sig):
+    """τ_max = (σ1 - σ3) / 2"""
+    s1, _, s3 = contraintes_principales(sig)
+    return (s1 - s3) / 2.0
+
+# --- Pression hydrostatique --------------------------------------------------
+def pression(sig):
+    """p = -(Sxx + Syy + Szz) / 3"""
+    return -(sig[:, 0] + sig[:, 1] + sig[:, 2]) / 3.0
+
+# --- Déformation équivalente de Von Mises ------------------------------------
+def eps_eq(eps):
+    """ε_eq = √(2/3) · ||ε_dev||"""
+    exx, eyy, ezz = eps[:, 0], eps[:, 1], eps[:, 2]
+    exy, exz, eyz = eps[:, 3], eps[:, 4], eps[:, 5]
+    emoy = (exx + eyy + ezz) / 3.0
+    dev  = np.column_stack([
+        exx - emoy, eyy - emoy, ezz - emoy,
+        exy, exz, eyz
+    ])
+    return np.sqrt(2.0 / 3.0) * np.linalg.norm(dev, axis=1)
+
+# --- Norme du vecteur déplacement --------------------------------------------
+def norme_dep(dep):
+    return np.linalg.norm(dep, axis=1)
+
+# Calculs sur les deux résultats
+vm_ref = von_mises(sig_ref)
+vm_md  = von_mises(sig_md)
+U_ref  = norme_dep(dep_ref)
+U_md   = norme_dep(dep_md)
+
+# ==============================================================================
+# 5. EXTRACTION SUR UN GROUPE DE NŒUDS / MAILLES
+#    Code_Aster numérote les nœuds dans l'ordre du maillage. Pour filtrer
+#    sur un groupe, on passe par le maillage Python (MA.getNodes(grp)).
+# ==============================================================================
+
+# # Récupérer les indices de nœuds d'un groupe (objet maillage requis)
+# indices_grp = MA.getNodes('NOM_GROUPE')   # liste d'entiers (indices 0-based)
+# sig_grp = sig_ref[indices_grp]            # contraintes sur le groupe seul
+# vm_grp  = von_mises(sig_grp)
+# print(f"Von Mises max sur groupe : {vm_grp.max():.2f} MPa")
+
+# ==============================================================================
+# 6. COMMANDES DSL CODE_ASTER (à écrire dans le .comm, hors blocs Python)
+# ==============================================================================
+
+# [ASTER] --- Calculer des champs dérivés -------------------------------------
+# resu = CALC_CHAMP(
+#     reuse  = resu,
+#     RESULTAT = resu,
+#     CONTRAINTE = ('SIGM_NOEU',),        # contraintes aux nœuds
+#     DEFORMATION = ('EPSI_NOEU',),       # déformations totales
+#     CRITERES = ('SIEQ_NOEU',),          # critères (Von Mises, Tresca…)
+# )
+# # SIEQ_NOEU contient : VMIS, TRESCA, PRIN_[1-3], VMIS_SG, VECT_1_[X/Y/Z]…
+
+# [ASTER] --- Extraire des valeurs en des points ------------------------------
+# tab = POST_RELEVE_T(
+#     ACTION = _F(
+#         OPERATION  = 'EXTRACTION',      # ou 'MOYENNE', 'EXTREMA'
+#         INTITULE   = 'depl_groupe',
+#         RESULTAT   = resu,
+#         NOM_CHAM   = 'DEPL',
+#         GROUP_NO   = 'GRP_SURFACE',     # groupe de nœuds
+#         NOM_CMP    = ('DX', 'DY', 'DZ'),
+#         INST       = 1.0,               # instant précis (ou TOUT_ORDRE=True)
+#     ),
+# )
+# IMPR_TABLE(TABLE=tab, FORMAT='CSV', UNITE=38)
+
+# [ASTER] --- Exporter les résultats dans un .med -----------------------------
+# IMPR_RESU(
+#     FORMAT  = 'MED',
+#     UNITE   = 80,
+#     RESU    = _F(
+#         RESULTAT  = resu,
+#         NOM_CHAM  = ('DEPL', 'SIGM_NOEU', 'SIEQ_NOEU'),
+#         TOUT_ORDRE = 'OUI',
+#     ),
+# )
+
+# [ASTER] --- Exporter les résultats dans un .resu texte ----------------------
+# IMPR_RESU(
+#     FORMAT  = 'RESULTAT',
+#     UNITE   = 8,
+#     RESU    = _F(
+#         RESULTAT   = resu,
+#         NOM_CHAM   = ('DEPL', 'SIGM_NOEU'),
+#         INST       = 1.0,
+#         GROUP_NO   = 'GRP_SURFACE',
+#     ),
+# )
+
+# [ASTER] --- Exporter un tableau CSV -----------------------------------------
+# tab_max = POST_RELEVE_T(
+#     ACTION = _F(
+#         OPERATION  = 'EXTREMA',
+#         INTITULE   = 'max_vm',
+#         RESULTAT   = resu,
+#         NOM_CHAM   = 'SIEQ_NOEU',
+#         NOM_CMP    = ('VMIS',),
+#         TOUT_ORDRE = 'OUI',
+#     ),
+# )
+# IMPR_TABLE(TABLE=tab_max, FORMAT='CSV', UNITE=38, SEPARATEUR=';')
+
+# ==============================================================================
+# 7. MÉTRIQUES D'ERREUR
+#    a = champ approché (modifié), r = champ de référence
+# ==============================================================================
+
+def erreur_L1(a, r):
+    """Erreur L1 relative [%] : Σ|a−r| / Σ|r|"""
+    return 100. * np.sum(np.abs(a - r)) / np.sum(np.abs(r))
+
+def erreur_L2(a, r):
+    """Erreur L2 relative [%] : ‖a−r‖ / ‖r‖"""
+    return 100. * np.linalg.norm(a - r) / np.linalg.norm(r)
+
+def erreur_Linf(a, r):
+    """Erreur L∞ relative [%] : max|a−r| / max|r|"""
+    return 100. * np.max(np.abs(a - r)) / np.max(np.abs(r))
+
+def rmse(a, r):
+    """Root Mean Square Error (unités du champ)"""
+    return float(np.sqrt(np.mean((a - r)**2)))
+
+def biais(a, r):
+    """Biais = décalage systématique moyen = mean(a − r)"""
+    return float(np.mean(a - r))
+
+def rapport_erreur(label, a, r):
+    """Affiche toutes les métriques pour un champ (+ print console)."""
+    ligne = (f"{label:<22s} | "
+             f"L2={erreur_L2(a,r):5.2f}% | "
+             f"Linf={erreur_Linf(a,r):5.2f}% | "
+             f"L1={erreur_L1(a,r):5.2f}% | "
+             f"RMSE={rmse(a,r):.3e} | "
+             f"Biais={biais(a,r):+.3e}")
+    print(ligne)
+    return ligne
+
+# ==============================================================================
+# 8. EXPORT CSV / TXT
+# ==============================================================================
+
+SCRATCH  = os.environ.get('SCRATCH', '/tmp')
+JOB_ID   = os.environ.get('SLURM_JOB_ID', 'local')
+OUT_DIR  = os.path.join(SCRATCH, f'resultats_{JOB_ID}')
+os.makedirs(OUT_DIR, exist_ok=True)
+
+TXT_PATH = os.path.join(OUT_DIR, 'resume_erreurs.txt')
+CSV_PATH = os.path.join(OUT_DIR, 'resume_erreurs.csv')
+
+# En-tête CSV (première exécution seulement)
+if not os.path.exists(CSV_PATH):
+    with open(CSV_PATH, 'w', newline='') as f:
+        csv.writer(f).writerow(['PARAM', 'LABEL', 'L2%', 'Linf%', 'L1%', 'RMSE', 'Biais'])
+
+# Dictionnaire des grandeurs à comparer : label → (modifié, référence)
+grandeurs = {
+    'Sxx [MPa]'       : (sig_md[:, 0], sig_ref[:, 0]),
+    'Syy [MPa]'       : (sig_md[:, 1], sig_ref  [:, 1]),
+    'Szz [MPa]'       : (sig_md[:, 2], sig_ref  [:, 2]),
+    'Sxy [MPa]'       : (sig_md[:, 3], sig_ref  [:, 3]),
+    'Sxz [MPa]'       : (sig_md[:, 4], sig_ref  [:, 4]),
+    'Syz [MPa]'       : (sig_md[:, 5], sig_ref  [:, 5]),
+    'Von Mises [MPa]' : (vm_md,        vm_ref),
+    'DX [mm]'         : (dep_md[:, 0], dep_ref[:, 0]),
+    'DY [mm]'         : (dep_md[:, 1], dep_ref[:, 1]),
+    'DZ [mm]'         : (dep_md[:, 2], dep_ref[:, 2]),
+    'U [mm]'          : (U_md,         U_ref),
+}
+
+# Export TXT (rapport lisible, mode append)
+with open(TXT_PATH, 'a') as f:
+    f.write(f"Parametre : {valeur_param}\n")
+    f.write("-" * 80 + "\n")
+    for label, (a, r) in grandeurs.items():
+        ligne = rapport_erreur(label, a, r)
+        f.write(ligne + "\n")
+    f.write("\n")
+
+# Export CSV (mode append, exploitable par comparecsv_v3.py ou pandas)
+with open(CSV_PATH, 'a', newline='') as f:
+    writer = csv.writer(f)
+    for label, (a, r) in grandeurs.items():
+        writer.writerow([
+            valeur_param, label,
+            f"{erreur_L2(a,r):.4f}",
+            f"{erreur_Linf(a,r):.4f}",
+            f"{erreur_L1(a,r):.4f}",
+            f"{rmse(a,r):.6e}",
+            f"{biais(a,r):+.6e}",
+        ])

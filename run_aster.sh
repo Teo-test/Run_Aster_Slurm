@@ -141,6 +141,7 @@ _dessiner_cases() {
 menu_fleches() {
     local msg="$1"; shift; local opts=("$@"); local n=${#opts[@]} sel=0
     printf "\n    ${BOLD}%s${NC}\n" "$msg" >/dev/tty
+    printf "    ${DIM}(↑↓ : naviguer  —  entrée : valider  —  ctrl+c : étape précédente)${NC}\n" >/dev/tty
     tput civis >/dev/tty 2>/dev/null || true
     _dessiner_menu "$sel" "${opts[@]}"
     while true; do
@@ -149,7 +150,7 @@ menu_fleches() {
             $'\x1b[A') sel=$(( (sel - 1 + n) % n )) ;;
             $'\x1b[B') sel=$(( (sel + 1) % n ))     ;;
             $'\x0d'|$'\x0a'|'') break ;;
-            $'\x03') tput cnorm >/dev/tty 2>/dev/null || true; printf "\n" >/dev/tty; _MENU_IDX=-1; return ;;
+            $'\x03') tput cnorm >/dev/tty 2>/dev/null || true; printf "    ${DIM}← Étape précédente${NC}\n" >/dev/tty; _MENU_IDX=-1; return ;;
         esac
         printf "\033[%dA" "$n" >/dev/tty
         _dessiner_menu "$sel" "${opts[@]}"
@@ -170,8 +171,9 @@ menu_cases() {
     local msg="$1"; shift; local opts=("$@"); local n=${#opts[@]} sel=0 i
     _COCHES=(); for ((i=0; i<n; i++)); do _COCHES[$i]=0; done
     printf "\n    ${BOLD}%s${NC}\n" "$msg" >/dev/tty
-    printf "    ${DIM}(espace : cocher  —  a : tout  —  i : inverser  —  entrée : valider)${NC}\n" >/dev/tty
+    printf "    ${DIM}(espace : cocher  —  a : tout  —  i : inverser  —  entrée : valider  —  ctrl+c : étape précédente)${NC}\n" >/dev/tty
     tput civis >/dev/tty 2>/dev/null || true
+    _MENU_IDX=0
     _dessiner_cases "$sel" "${opts[@]}"
     while true; do
         _lire_touche
@@ -183,7 +185,7 @@ menu_cases() {
             'a')        for ((j=0; j<n; j++)); do _COCHES[$j]=1; done ;;
             'i')        for ((j=0; j<n; j++)); do _COCHES[$j]=$(( _COCHES[j] ^ 1 )); done ;;
             $'\x0d'|$'\x0a'|'') break ;;
-            $'\x03') tput cnorm >/dev/tty 2>/dev/null || true; printf "\n" >/dev/tty; _MENU_ITEMS=(); return ;;
+            $'\x03') tput cnorm >/dev/tty 2>/dev/null || true; printf "    ${DIM}← Étape précédente${NC}\n" >/dev/tty; _MENU_ITEMS=(); _MENU_IDX=-1; return ;;
         esac
         printf "\033[%dA" "$n" >/dev/tty
         _dessiner_cases "$sel" "${opts[@]}"
@@ -798,194 +800,240 @@ if [ ! -d "$SCRATCH_BASE" ]; then
     SCRATCH_BASE="$_SAISIE"
 fi
 
+# Ctrl+C sur une étape revient à l'étape précédente (sauf étape 1 → sortie)
+_STEP=0
+while true; do
+case $_STEP in
+
 # ┌─────────────────────────────────────────────────────────────
 # │ ÉTAPE 1 — Dossier d'étude
 # └─────────────────────────────────────────────────────────────
-_ETAPE_COURANTE=0
-afficher_progression
-section "Dossier d'étude"
+0)
+    _ETAPE_COURANTE=0
+    afficher_progression
+    section "Dossier d'étude"
 
-local_dossiers=()
-while IFS= read -r d; do local_dossiers+=("$d"); done < <(
-    find . -maxdepth 2 -name "*.comm" -printf '%h\n' 2>/dev/null | sort -u | sed 's|^\./\?||;/^$/d'
-)
-[ ${#local_dossiers[@]} -eq 0 ] && local_dossiers=(".")
+    local_dossiers=()
+    while IFS= read -r d; do local_dossiers+=("$d"); done < <(
+        find . -maxdepth 2 -name "*.comm" -printf '%h\n' 2>/dev/null | sort -u | sed 's|^\./\?||;/^$/d'
+    )
+    [ ${#local_dossiers[@]} -eq 0 ] && local_dossiers=(".")
 
-if [ ${#local_dossiers[@]} -gt 1 ]; then
-    menu_fleches "Dossier contenant le .comm :" "${local_dossiers[@]}"
-    [ "$_MENU_IDX" -eq -1 ] && { warn "Annulé."; exit 0; }
-    STUDY_DIR="${local_dossiers[$_MENU_IDX]}"
-else
-    saisir "Dossier d'étude" "${local_dossiers[0]}"
-    STUDY_DIR="$_SAISIE"
-fi
+    if [ ${#local_dossiers[@]} -gt 1 ]; then
+        menu_fleches "Dossier contenant le .comm :" "${local_dossiers[@]}"
+        if [ "$_MENU_IDX" -eq -1 ]; then
+            warn "Annulé." >/dev/tty
+            exit 0
+        fi
+        STUDY_DIR="${local_dossiers[$_MENU_IDX]}"
+    else
+        saisir "Dossier d'étude" "${local_dossiers[0]}"
+        STUDY_DIR="$_SAISIE"
+    fi
 
-STUDY_DIR="$(realpath "$STUDY_DIR")"
-STUDY_NAME="$(basename "$STUDY_DIR")"
-[ -d "$STUDY_DIR" ] || { err "Dossier introuvable : $STUDY_DIR"; exit 1; }
-if [[ "$STUDY_NAME" =~ [,=\ ] ]]; then
-    err "Le nom du dossier ne peut pas contenir de virgule, espace ou '=' : '$STUDY_NAME'"
-    exit 1
-fi
-ok "Dossier : ${STUDY_DIR}" >/dev/tty
+    STUDY_DIR="$(realpath "$STUDY_DIR")"
+    STUDY_NAME="$(basename "$STUDY_DIR")"
+    if [ ! -d "$STUDY_DIR" ]; then
+        err "Dossier introuvable : $STUDY_DIR"
+        continue
+    fi
+    if [[ "$STUDY_NAME" =~ [,=\ ] ]]; then
+        err "Le nom du dossier ne peut pas contenir de virgule, espace ou '=' : '$STUDY_NAME'"
+        continue
+    fi
+    ok "Dossier : ${STUDY_DIR}" >/dev/tty
+    _STEP=1
+    ;;
 
 # ┌─────────────────────────────────────────────────────────────
 # │ ÉTAPE 2 — Détection des fichiers
 # └─────────────────────────────────────────────────────────────
-_ETAPE_COURANTE=1
-afficher_progression
-section "Détection des fichiers"
+1)
+    _ETAPE_COURANTE=1
+    afficher_progression
+    section "Détection des fichiers"
 
-# .comm
-COMM=$(_find_first "$STUDY_DIR" "*.comm")
-[ -z "$COMM" ] && { err "Aucun .comm dans $STUDY_DIR"; exit 1; }
-COMM="$(realpath "$COMM")"
-ok ".comm : $(basename "$COMM")" >/dev/tty
+    COMM=$(_find_first "$STUDY_DIR" "*.comm")
+    if [ -z "$COMM" ]; then
+        err "Aucun .comm dans $STUDY_DIR"
+        _STEP=0
+        continue
+    fi
+    COMM="$(realpath "$COMM")"
+    ok ".comm : $(basename "$COMM")" >/dev/tty
 
-# .med
-MED=$(_find_first "$STUDY_DIR" "*.med" 2>/dev/null || true)
-[ -n "$MED" ] && { MED="$(realpath "$MED")"; ok ".med  : $(basename "$MED")" >/dev/tty; }
+    MED=$(_find_first "$STUDY_DIR" "*.med" 2>/dev/null || true)
+    [ -n "$MED" ] && { MED="$(realpath "$MED")"; ok ".med  : $(basename "$MED")" >/dev/tty; }
 
-# .mail
-MAIL=$(_find_first "$STUDY_DIR" "*.mail" 2>/dev/null || true)
-[ -n "$MAIL" ] && { MAIL="$(realpath "$MAIL")"; ok ".mail : $(basename "$MAIL")" >/dev/tty; }
+    MAIL=$(_find_first "$STUDY_DIR" "*.mail" 2>/dev/null || true)
+    [ -n "$MAIL" ] && { MAIL="$(realpath "$MAIL")"; ok ".mail : $(basename "$MAIL")" >/dev/tty; }
 
-# Base de poursuite
-if grep -q "POURSUITE" "$COMM" 2>/dev/null; then
-    echo "" >/dev/tty
-    info "POURSUITE détecté dans le .comm" >/dev/tty
-    saisir "Dossier de base (glob.*/pick.*) — vide = auto-detection" ""
-    [ -n "$_SAISIE" ] && BASE_DIR="$_SAISIE"
-fi
+    BASE_DIR=""
+    if grep -q "POURSUITE" "$COMM" 2>/dev/null; then
+        echo "" >/dev/tty
+        info "POURSUITE détecté dans le .comm" >/dev/tty
+        saisir "Dossier de base (glob.*/pick.*) — vide = auto-detection" ""
+        [ -n "$_SAISIE" ] && BASE_DIR="$_SAISIE"
+    fi
 
-# Fichiers auxiliaires
-shopt -s nullglob
-local_aux=("$STUDY_DIR"/*.py "$STUDY_DIR"/*.dat "$STUDY_DIR"/*.para \
-           "$STUDY_DIR"/*.include "$STUDY_DIR"/*.mfront)
-shopt -u nullglob
-if [ ${#local_aux[@]} -gt 0 ]; then
-    info "${#local_aux[@]} fichier(s) auxiliaire(s) détecté(s)" >/dev/tty
-fi
+    shopt -s nullglob
+    local_aux=("$STUDY_DIR"/*.py "$STUDY_DIR"/*.dat "$STUDY_DIR"/*.para \
+               "$STUDY_DIR"/*.include "$STUDY_DIR"/*.mfront)
+    shopt -u nullglob
+    [ ${#local_aux[@]} -gt 0 ] && info "${#local_aux[@]} fichier(s) auxiliaire(s) détecté(s)" >/dev/tty
+    _STEP=2
+    ;;
 
 # ┌─────────────────────────────────────────────────────────────
 # │ ÉTAPE 3 — Sorties du calcul
 # └─────────────────────────────────────────────────────────────
-_ETAPE_COURANTE=2
-afficher_progression
-section "Sorties du calcul"
+2)
+    _ETAPE_COURANTE=2
+    afficher_progression
+    section "Sorties du calcul"
 
-info "Analyse de $(basename "$COMM")..." >/dev/tty
-_parse_comm_outputs "$COMM"
+    RESULTS=""
+    info "Analyse de $(basename "$COMM")..." >/dev/tty
+    _parse_comm_outputs "$COMM"
 
-if [ ${#_COMM_OUTPUTS[@]} -gt 0 ]; then
-    local_labels=()
-    for _item in "${_COMM_OUTPUTS[@]}"; do local_labels+=("${_item%%|*}"); done
-    menu_cases "Sorties supplémentaires à inclure :" "${local_labels[@]}"
+    if [ ${#_COMM_OUTPUTS[@]} -gt 0 ]; then
+        local_labels=()
+        for _item in "${_COMM_OUTPUTS[@]}"; do local_labels+=("${_item%%|*}"); done
+        menu_cases "Sorties supplémentaires à inclure :" "${local_labels[@]}"
+        if [ "$_MENU_IDX" -eq -1 ]; then
+            _STEP=$((_STEP - 1))
+            continue
+        fi
 
-    local_sel_results=""
-    for _idx in "${_MENU_ITEMS[@]}"; do
-        _item="${_COMM_OUTPUTS[$_idx]}"
-        local_type="${_item#*|}"; local_type="${local_type%%|*}"
-        local_unite="${_item##*|}"
-        [ -n "$local_sel_results" ] && local_sel_results+=","
-        local_sel_results+="${local_type}:${local_unite}"
-    done
-    [ -n "$local_sel_results" ] && RESULTS="$local_sel_results"
-else
-    info "Aucune sortie supplémentaire détectée dans le .comm" >/dev/tty
-    info "Sorties par défaut : .mess, .resu, .rmed (unite 80)" >/dev/tty
-fi
+        local_sel_results=""
+        for _idx in "${_MENU_ITEMS[@]}"; do
+            _item="${_COMM_OUTPUTS[$_idx]}"
+            local_type="${_item#*|}"; local_type="${local_type%%|*}"
+            local_unite="${_item##*|}"
+            [ -n "$local_sel_results" ] && local_sel_results+=","
+            local_sel_results+="${local_type}:${local_unite}"
+        done
+        [ -n "$local_sel_results" ] && RESULTS="$local_sel_results"
+    else
+        info "Aucune sortie supplémentaire détectée dans le .comm" >/dev/tty
+        info "Sorties par défaut : .mess, .resu, .rmed (unite 80)" >/dev/tty
+    fi
+    _STEP=3
+    ;;
 
 # ┌─────────────────────────────────────────────────────────────
 # │ ÉTAPE 4 — Ressources Slurm
 # └─────────────────────────────────────────────────────────────
-_ETAPE_COURANTE=3
-afficher_progression
-section "Ressources Slurm"
+3)
+    _ETAPE_COURANTE=3
+    afficher_progression
+    section "Ressources Slurm"
 
-menu_fleches "Preset de ressources :" \
-    "court   — ${PRESET_PARTITION[court]}   │ ${PRESET_MEM[court]}   │ ${PRESET_TIME[court]}" \
-    "moyen   — ${PRESET_PARTITION[moyen]}  │ ${PRESET_MEM[moyen]}  │ ${PRESET_TIME[moyen]}" \
-    "long    — ${PRESET_PARTITION[long]}    │ ${PRESET_MEM[long]}  │ ${PRESET_TIME[long]}" \
-    "Manuel  — saisir les valeurs"
-[ "$_MENU_IDX" -eq -1 ] && { warn "Annulé."; exit 0; }
+    menu_fleches "Preset de ressources :" \
+        "court   — ${PRESET_PARTITION[court]}   │ ${PRESET_MEM[court]}   │ ${PRESET_TIME[court]}" \
+        "moyen   — ${PRESET_PARTITION[moyen]}  │ ${PRESET_MEM[moyen]}  │ ${PRESET_TIME[moyen]}" \
+        "long    — ${PRESET_PARTITION[long]}    │ ${PRESET_MEM[long]}  │ ${PRESET_TIME[long]}" \
+        "Manuel  — saisir les valeurs"
+    if [ "$_MENU_IDX" -eq -1 ]; then
+        _STEP=$((_STEP - 1))
+        continue
+    fi
 
-local_presets=(court moyen long)
-if [ "$_MENU_IDX" -lt 3 ]; then
-    local_p="${local_presets[$_MENU_IDX]}"
-    PARTITION="${PRESET_PARTITION[$local_p]}"
-    NODES="${PRESET_NODES[$local_p]}"
-    NTASKS="${PRESET_NTASKS[$local_p]}"
-    MEM="${PRESET_MEM[$local_p]}"
-    TIME_LIMIT="${PRESET_TIME[$local_p]}"
-    CPUS="$DEFAULT_CPUS"
-else
-    saisir "Partition"        "$DEFAULT_PARTITION"; PARTITION="$_SAISIE"
-    saisir "Nb nœuds"         "$DEFAULT_NODES";     NODES="$_SAISIE"
-    saisir "Nb tâches MPI"    "$DEFAULT_NTASKS";    NTASKS="$_SAISIE"
-    saisir "CPUs par tâche"   "$DEFAULT_CPUS";      CPUS="$_SAISIE"
-    saisir "Mémoire (ex: 8G)" "$DEFAULT_MEM";       MEM="$_SAISIE"
-    saisir "Durée max"        "$DEFAULT_TIME";       TIME_LIMIT="$_SAISIE"
-fi
+    local_presets=(court moyen long)
+    if [ "$_MENU_IDX" -lt 3 ]; then
+        local_p="${local_presets[$_MENU_IDX]}"
+        PARTITION="${PRESET_PARTITION[$local_p]}"
+        NODES="${PRESET_NODES[$local_p]}"
+        NTASKS="${PRESET_NTASKS[$local_p]}"
+        MEM="${PRESET_MEM[$local_p]}"
+        TIME_LIMIT="${PRESET_TIME[$local_p]}"
+        CPUS="$DEFAULT_CPUS"
+    else
+        saisir "Partition"        "$DEFAULT_PARTITION"; PARTITION="$_SAISIE"
+        saisir "Nb nœuds"         "$DEFAULT_NODES";     NODES="$_SAISIE"
+        saisir "Nb tâches MPI"    "$DEFAULT_NTASKS";    NTASKS="$_SAISIE"
+        saisir "CPUs par tâche"   "$DEFAULT_CPUS";      CPUS="$_SAISIE"
+        saisir "Mémoire (ex: 8G)" "$DEFAULT_MEM";       MEM="$_SAISIE"
+        saisir "Durée max"        "$DEFAULT_TIME";       TIME_LIMIT="$_SAISIE"
+    fi
 
-# Valeurs par defaut pour ce qui n'a pas ete positionne
-: "${PARTITION:=$DEFAULT_PARTITION}"; : "${NODES:=$DEFAULT_NODES}"
-: "${NTASKS:=$DEFAULT_NTASKS}"; : "${CPUS:=$DEFAULT_CPUS}"
-: "${MEM:=$DEFAULT_MEM}"; : "${TIME_LIMIT:=$DEFAULT_TIME}"
+    : "${PARTITION:=$DEFAULT_PARTITION}"; : "${NODES:=$DEFAULT_NODES}"
+    : "${NTASKS:=$DEFAULT_NTASKS}"; : "${CPUS:=$DEFAULT_CPUS}"
+    : "${MEM:=$DEFAULT_MEM}"; : "${TIME_LIMIT:=$DEFAULT_TIME}"
+    _STEP=4
+    ;;
 
 # ┌─────────────────────────────────────────────────────────────
 # │ ÉTAPE 5 — Options
 # └─────────────────────────────────────────────────────────────
-_ETAPE_COURANTE=4
-afficher_progression
-section "Options"
+4)
+    _ETAPE_COURANTE=4
+    afficher_progression
+    section "Options"
 
-menu_cases "Options :" \
-    "Suivre le job en temps réel" \
-    "Conserver le scratch après le calcul" \
-    "Dry-run — afficher sans soumettre" \
-    "Désactiver la validation du .comm"
+    FOLLOW=0; KEEP_SCRATCH=0; DRY_RUN=0; NO_VALIDATE=0
+    menu_cases "Options :" \
+        "Suivre le job en temps réel" \
+        "Conserver le scratch après le calcul" \
+        "Dry-run — afficher sans soumettre" \
+        "Désactiver la validation du .comm"
+    if [ "$_MENU_IDX" -eq -1 ]; then
+        _STEP=$((_STEP - 1))
+        continue
+    fi
 
-for idx in "${_MENU_ITEMS[@]}"; do
-    case "$idx" in 0) FOLLOW=1 ;; 1) KEEP_SCRATCH=1 ;; 2) DRY_RUN=1 ;; 3) NO_VALIDATE=1 ;; esac
-done
+    for idx in "${_MENU_ITEMS[@]}"; do
+        case "$idx" in 0) FOLLOW=1 ;; 1) KEEP_SCRATCH=1 ;; 2) DRY_RUN=1 ;; 3) NO_VALIDATE=1 ;; esac
+    done
+    _STEP=5
+    ;;
 
 # ┌─────────────────────────────────────────────────────────────
 # │ ÉTAPE 6 — Récapitulatif et confirmation
 # └─────────────────────────────────────────────────────────────
-_ETAPE_COURANTE=5
-afficher_progression
-section "Récapitulatif"
+5)
+    _ETAPE_COURANTE=5
+    afficher_progression
+    section "Récapitulatif"
 
-echo "" >/dev/tty
-printf "    ${BOLD}%-14s${NC} %s\n" "Dossier"   "$STUDY_DIR"                      >/dev/tty
-printf "    ${BOLD}%-14s${NC} %s\n" ".comm"      "$(basename "$COMM")"             >/dev/tty
-[ -n "$MED" ]  && printf "    ${BOLD}%-14s${NC} %s\n" ".med"  "$(basename "$MED")" >/dev/tty
-[ -n "$MAIL" ] && printf "    ${BOLD}%-14s${NC} %s\n" ".mail" "$(basename "$MAIL")">/dev/tty
-echo -e "    ${DIM}──────────────────────────────────────${NC}"                     >/dev/tty
-printf "    ${BOLD}%-14s${NC} %s\n" "Partition"  "$PARTITION"                       >/dev/tty
-printf "    ${BOLD}%-14s${NC} %s\n" "Nœuds"      "$NODES"                           >/dev/tty
-printf "    ${BOLD}%-14s${NC} %s\n" "Tâches MPI" "$NTASKS"                          >/dev/tty
-printf "    ${BOLD}%-14s${NC} %s\n" "CPUs/tâche" "$CPUS"                            >/dev/tty
-printf "    ${BOLD}%-14s${NC} %s\n" "Mémoire"    "$MEM"                             >/dev/tty
-printf "    ${BOLD}%-14s${NC} %s\n" "Durée max"  "$TIME_LIMIT"                      >/dev/tty
-if [ -n "$RESULTS" ]; then
-    echo -e "    ${DIM}──────────────────────────────────────${NC}"                  >/dev/tty
-    printf "    ${BOLD}%-14s${NC} %s\n" "Sorties"    "$RESULTS"                     >/dev/tty
-fi
-local_opts_str=""
-[ "$FOLLOW"       = "1" ] && local_opts_str+="follow "
-[ "$KEEP_SCRATCH" = "1" ] && local_opts_str+="keep-scratch "
-[ "$DRY_RUN"      = "1" ] && local_opts_str+="dry-run "
-[ "$NO_VALIDATE"  = "1" ] && local_opts_str+="no-validate "
-if [ -n "$local_opts_str" ]; then
-    echo -e "    ${DIM}──────────────────────────────────────${NC}"                  >/dev/tty
-    printf "    ${BOLD}%-14s${NC} %s\n" "Options"    "$local_opts_str"               >/dev/tty
-fi
-echo "" >/dev/tty
+    echo "" >/dev/tty
+    printf "    ${BOLD}%-14s${NC} %s\n" "Dossier"   "$STUDY_DIR"                      >/dev/tty
+    printf "    ${BOLD}%-14s${NC} %s\n" ".comm"      "$(basename "$COMM")"             >/dev/tty
+    [ -n "$MED" ]  && printf "    ${BOLD}%-14s${NC} %s\n" ".med"  "$(basename "$MED")" >/dev/tty
+    [ -n "$MAIL" ] && printf "    ${BOLD}%-14s${NC} %s\n" ".mail" "$(basename "$MAIL")">/dev/tty
+    echo -e "    ${DIM}──────────────────────────────────────${NC}"                     >/dev/tty
+    printf "    ${BOLD}%-14s${NC} %s\n" "Partition"  "$PARTITION"                       >/dev/tty
+    printf "    ${BOLD}%-14s${NC} %s\n" "Nœuds"      "$NODES"                           >/dev/tty
+    printf "    ${BOLD}%-14s${NC} %s\n" "Tâches MPI" "$NTASKS"                          >/dev/tty
+    printf "    ${BOLD}%-14s${NC} %s\n" "CPUs/tâche" "$CPUS"                            >/dev/tty
+    printf "    ${BOLD}%-14s${NC} %s\n" "Mémoire"    "$MEM"                             >/dev/tty
+    printf "    ${BOLD}%-14s${NC} %s\n" "Durée max"  "$TIME_LIMIT"                      >/dev/tty
+    if [ -n "$RESULTS" ]; then
+        echo -e "    ${DIM}──────────────────────────────────────${NC}"                  >/dev/tty
+        printf "    ${BOLD}%-14s${NC} %s\n" "Sorties"    "$RESULTS"                     >/dev/tty
+    fi
+    local_opts_str=""
+    [ "$FOLLOW"       = "1" ] && local_opts_str+="follow "
+    [ "$KEEP_SCRATCH" = "1" ] && local_opts_str+="keep-scratch "
+    [ "$DRY_RUN"      = "1" ] && local_opts_str+="dry-run "
+    [ "$NO_VALIDATE"  = "1" ] && local_opts_str+="no-validate "
+    if [ -n "$local_opts_str" ]; then
+        echo -e "    ${DIM}──────────────────────────────────────${NC}"                  >/dev/tty
+        printf "    ${BOLD}%-14s${NC} %s\n" "Options"    "$local_opts_str"               >/dev/tty
+    fi
+    echo "" >/dev/tty
 
-menu_fleches "Confirmer la soumission ?" "✅  Soumettre le calcul" "❌  Annuler"
-[ "$_MENU_IDX" -ne 0 ] && { warn "Annulé."; exit 0; }
+    menu_fleches "Confirmer la soumission ?" "✅  Soumettre le calcul" "❌  Annuler"
+    if [ "$_MENU_IDX" -eq -1 ]; then
+        _STEP=$((_STEP - 1))
+        continue
+    fi
+    [ "$_MENU_IDX" -ne 0 ] && { warn "Annulé."; exit 0; }
+    break
+    ;;
+
+esac
+done
 
 # ══════════════════════════════════════════════════════════════
 #  EXÉCUTION — set -euo pipefail à partir d'ici

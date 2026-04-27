@@ -1,0 +1,954 @@
+"""
+================================================================================
+  CODE_ASTER – CHEATSHEET CALCUL THERMO-MÉCANIQUE – SIMULATION DE SOUDAGE
+  Méthode macro-dépôt (passes successives, activation d'éléments)
+================================================================================
+  SOMMAIRE
+    1.  Structure générale & séquencement
+    2.  Maillage & groupes
+    3.  Modèle thermique
+    4.  Matériaux thermiques (propriétés fonction de T)
+    5.  Source de chaleur de Goldak (double ellipsoïde)
+    6.  Conditions aux limites thermiques (convection, rayonnement)
+    7.  Résolution thermique  → THER_NON_LINE
+    8.  Modèle mécanique
+    9.  Matériaux mécaniques (élasto-plasticité, dilatation thermique)
+   10.  Activation des éléments – technique macro-dépôt
+   11.  Transfert thermique → mécanique (champ de température)
+   12.  Conditions aux limites mécaniques
+   13.  Résolution mécanique → STAT_NON_LINE
+   14.  Post-traitement & export
+================================================================================
+  HYPOTHÈSES DU MODÈLE
+    · Couplage faible (one-way) : thermique d'abord, puis mécanique
+    · Loi de comportement : élasto-plasticité isotrope avec écrouissage
+    · Dilatation thermique pilotée par le champ TEMP issu du calcul thermique
+    · Activation des passes : matériau inerte → matériau réel au dépôt
+================================================================================
+"""
+
+DEBUT()
+
+# ==============================================================================
+# 1. STRUCTURE GÉNÉRALE & SÉQUENCEMENT
+# ==============================================================================
+#
+#  ┌─────────────┐    ┌──────────────────────┐    ┌──────────────────────┐
+#  │  MAILLAGE   │───►│  CALCUL THERMIQUE    │───►│  CALCUL MÉCANIQUE    │
+#  │  + GROUPES  │    │  THER_NON_LINE       │    │  STAT_NON_LINE       │
+#  └─────────────┘    │  (source Goldak,     │    │  (dilatation therm., │
+#                     │   convection, ray.)  │    │   élasto-plasticité) │
+#                     └──────────────────────┘    └──────────────────────┘
+#
+#  Convention de nommage recommandée :
+#    RESU_T  – résultat thermique  (type EVOL_THER)
+#    RESU_M  – résultat mécanique  (type EVOL_NOLI)
+#    MAT_T   – matériau thermique
+#    MAT_M   – matériau mécanique
+#    MO_T    – modèle thermique
+#    MO_M    – modèle mécanique
+
+# ==============================================================================
+# 2. MAILLAGE & GROUPES
+# ==============================================================================
+
+MA = LIRE_MAILLAGE(FORMAT='MED', UNITE=20)
+
+MA = DEFI_GROUP(
+    reuse   = MA,
+    MAILLAGE = MA,
+    CREA_GROUP_MA = (
+        # Zones du maillage
+        _F(NOM='SUBSTRAT',  GROUP_MA='SUBSTRAT'),   # pièce de base
+        _F(NOM='PASSE_1',   GROUP_MA='PASSE_1'),    # 1ère passe de soudage
+        _F(NOM='PASSE_2',   GROUP_MA='PASSE_2'),    # 2ème passe
+        # ...ajouter autant de passes que nécessaire
+        _F(NOM='TOUT',      TOUT='OUI'),             # volume complet
+    ),
+    CREA_GROUP_NO = (
+        _F(NOM='ENCASTRE',  GROUP_MA='FACE_ENCAST'), # nœuds de la face bloquée
+        _F(NOM='SYM_XZ',    GROUP_MA='FACE_SYM'),    # plan de symétrie
+        _F(NOM='SURF_EXT',  GROUP_MA='SURFACE'),      # surface extérieure (conv./ray.)
+    ),
+)
+
+# ==============================================================================
+# 3. MODÈLE THERMIQUE
+# ==============================================================================
+
+MO_T = AFFE_MODELE(
+    MAILLAGE = MA,
+    AFFE = _F(
+        TOUT          = 'OUI',
+        PHENOMENE     = 'THERMIQUE',
+        MODELISATION  = '3D',          # ou '3D_DIAG' (matrice diagonale, plus rapide)
+    ),
+)
+
+# ==============================================================================
+# 4. MATÉRIAUX THERMIQUES (propriétés dépendantes de T)
+# ==============================================================================
+#
+#  Toutes les fonctions de T sont définies par DEFI_NAPPE ou DEFI_FONCTION.
+#  Unités courantes : T en °C, lambda en W/(m·°C), rho*Cp en J/(m³·°C)
+
+# --- Conductivité thermique λ(T) [W/(m·°C)] ----------------------------------
+#     DEFI_FONCTION pour une courbe 1D f(T). DEFI_NAPPE est réservé aux
+#     surfaces 2D f(T, ε_p), e.g. pour une limite d'élasticité isotrope.
+LAMBDA = DEFI_FONCTION(
+    NOM_PARA    = 'TEMP',
+    PROL_DROITE = 'CONSTANT',
+    PROL_GAUCHE = 'CONSTANT',
+    VALE        = (
+        20.,  45.,
+        200., 40.,
+        400., 35.,
+        600., 30.,
+        800., 28.,
+        1200., 26.,
+        1500., 32.,   # zone liquide
+    ),
+)
+
+# --- Capacité calorifique volumique ρ·Cp(T) [J/(m³·°C)] ----------------------
+RHO_CP = DEFI_FONCTION(
+    NOM_PARA    = 'TEMP',
+    PROL_DROITE = 'CONSTANT',
+    PROL_GAUCHE = 'CONSTANT',
+    VALE        = (
+        20.,   3.5e6,
+        200.,  4.0e6,
+        400.,  4.5e6,
+        700.,  5.2e6,
+        1200., 5.8e6,
+        1500., 6.0e6,
+    ),
+)
+
+MAT_T = DEFI_MATERIAU(
+    THER_NL = _F(
+        LAMBDA  = LAMBDA,    # conductivité non linéaire (THER_NL requis)
+        RHO_CP  = RHO_CP,
+    ),
+)
+
+# Affectation du matériau thermique (même matériau partout ici)
+AFFE_T = AFFE_MATERIAU(
+    MAILLAGE = MA,
+    AFFE = _F(TOUT='OUI', MATER=MAT_T),
+)
+
+# ==============================================================================
+# 5. SOURCE DE CHALEUR DE GOLDAK (double ellipsoïde)
+# ==============================================================================
+#
+#  Modèle de Goldak (1984) :
+#
+#    q_f(x,y,z) = (6√3 · f_f · Q) / (π√π · a · b · c_f)
+#                 · exp(−3x²/a² − 3y²/b² − 3z²/c_f²)   (demi-ellipse avant)
+#
+#    q_r(x,y,z) = (6√3 · f_r · Q) / (π√π · a · b · c_r)
+#                 · exp(−3x²/a² − 3y²/b² − 3z²/c_r²)   (demi-ellipse arrière)
+#
+#  Paramètres :
+#    Q  = P · η        (puissance nette [W])
+#    P  = puissance électrique de l'arc [W]
+#    η  = rendement thermique (acier : 0.7–0.85)
+#    a  = demi-largeur [m]
+#    b  = demi-profondeur (pénétration) [m]
+#    c_f = demi-longueur avant  (c_f ≈ 0.5 · c_r typiquement)
+#    c_r = demi-longueur arrière
+#    f_f + f_r = 2  (fractions d'énergie, ex. f_f=0.6, f_r=1.4)
+
+# Paramètres source (à adapter à votre procédé)
+P     = 3000.    # [W]   puissance arc
+ETA   = 0.80     # [-]   rendement
+Q     = P * ETA  # [W]   puissance nette
+A_G   = 4.e-3    # [m]   demi-largeur
+B_G   = 3.e-3    # [m]   demi-profondeur
+CF_G  = 3.e-3    # [m]   demi-longueur avant
+CR_G  = 8.e-3    # [m]   demi-longueur arrière
+FF_G  = 0.6      # [-]
+FR_G  = 1.4      # [-]
+V_SOUD = 5.e-3   # [m/s] vitesse de soudage
+
+import math
+C1F = (6. * math.sqrt(3.) * FF_G * Q) / (math.pi * math.sqrt(math.pi) * A_G * B_G * CF_G)
+C1R = (6. * math.sqrt(3.) * FR_G * Q) / (math.pi * math.sqrt(math.pi) * A_G * B_G * CR_G)
+
+# La source est mobile : x(t) = x0 + V_soud · t
+# Dans AFFE_CHAR_THER on peut utiliser SOUR_NL avec une formule Python
+
+def source_goldak(x, y, z, t):
+    """Retourne la densité volumique de source [W/m³] au point (x,y,z) à t."""
+    xi = x - V_SOUD * t   # coordonnée dans le repère de la source
+    r2 = -3. * y**2 / A_G**2 - 3. * z**2 / B_G**2
+    if xi >= 0.:        # demi-ellipse avant
+        return C1F * math.exp(r2 - 3. * xi**2 / CF_G**2)
+    else:               # demi-ellipse arrière
+        return C1R * math.exp(r2 - 3. * xi**2 / CR_G**2)
+
+# Intégration dans AFFE_CHAR_THER via SOUR_NL (formule évaluée aux pts de Gauss)
+# CHAR_T = AFFE_CHAR_THER(
+#     MODELE = MO_T,
+#     SOUR_NL = _F(
+#         TOUT   = 'OUI',
+#         SOUR   = Formule(NOM_PARA=('X','Y','Z','INST'),
+#                          VALE='source_goldak(X,Y,Z,INST)'),
+#     ),
+# )
+
+# ==============================================================================
+# 6. CONDITIONS AUX LIMITES THERMIQUES
+# ==============================================================================
+
+# Température initiale (condition initiale uniforme)
+T_INIT = 20.   # [°C]
+
+# Coefficient de convection h [W/(m²·°C)] et température ambiante T_amb
+H_CONV  = 15.     # [W/(m²·°C)]  convection naturelle + forçée
+T_AMB   = 20.     # [°C]
+
+# Coefficient d'émissivité ε et σ (Stefan-Boltzmann)
+EMISS   = 0.7     # [-]
+SIGMA_B = 5.67e-8 # [W/(m²·K⁴)]
+
+CHAR_T = AFFE_CHAR_THER(
+    MODELE = MO_T,
+
+    # Source volumique externe (Goldak — dépend de X,Y,Z,INST, pas de T → SOURCE)
+    # SOUR_NL est réservé aux sources dépendant de la température inconnue.
+    SOURCE = _F(
+        GROUP_MA = 'PASSE_1',
+        SOUR     = Formule(NOM_PARA=('X', 'Y', 'Z', 'INST'),
+                           VALE='source_goldak(X, Y, Z, INST)'),
+    ),
+
+    # Convection sur la surface extérieure
+    CONVECTION = _F(
+        GROUP_MA = 'SURF_EXT',
+        COEF_H   = H_CONV,
+        TEMP_EXT = T_AMB,
+    ),
+
+    # Rayonnement (formulation NL : q = ε·σ·(T⁴ − T_amb⁴))
+    RAYONNEMENT = _F(
+        GROUP_MA = 'SURF_EXT',
+        SIGMA    = SIGMA_B,
+        EPSILON  = EMISS,
+        TEMP_EXT = T_AMB,
+    ),
+)
+
+# Condition initiale : champ thermique uniforme à T_INIT
+TEMP_INI = CREA_CHAMP(
+    TYPE_CHAM  = 'NOEU_TEMP_R',
+    OPERATION  = 'AFFE',
+    MAILLAGE   = MA,
+    AFFE       = _F(TOUT='OUI', NOM_CMP='TEMP', VALE=T_INIT),
+)
+
+# ==============================================================================
+# 7. RÉSOLUTION THERMIQUE — THER_NON_LINE
+# ==============================================================================
+#
+#  Découpage en passes : on peut relancer THER_NON_LINE pour chaque passe
+#  en changeant ETAT_INIT et en mettant à jour AFFE_MATERIAU / CHAR_T.
+
+# Discrétisation temporelle (exemple pour une passe de 10 s avec refroidissement)
+L_INST_T = DEFI_LIST_REEL(
+    DEBUT = 0.,
+    INTERVALLE = (
+        _F(JUSQU_A=5.,  NOMBRE=50),   # passage de la source (5 s)
+        _F(JUSQU_A=60., NOMBRE=55),   # refroidissement partiel (55 s)
+    ),
+)
+
+RESU_T = THER_NON_LINE(
+    MODELE      = MO_T,
+    CHAM_MATER  = AFFE_T,
+    EXCIT       = _F(CHARGE=CHAR_T),
+    INCREMENT   = _F(LIST_INST=L_INST_T),
+    ETAT_INIT   = _F(CHAM_NO=TEMP_INI),   # T uniforme initiale
+    CONVERGENCE = _F(
+        RESI_GLOB_RELA = 1.e-6,
+        ITER_GLOB_MAXI = 30,
+    ),
+    NEWTON      = _F(REAC_ITER=1),
+    ARCHIVAGE   = _F(LIST_INST=L_INST_T),
+)
+
+# Pour une passe suivante (POURSUITE thermique) :
+# RESU_T = THER_NON_LINE(
+#     reuse      = RESU_T,
+#     MODELE     = MO_T,
+#     CHAM_MATER = AFFE_T_PASSE2,   # matériau avec PASSE_2 activée
+#     EXCIT      = _F(CHARGE=CHAR_T_PASSE2),
+#     INCREMENT  = _F(LIST_INST=L_INST_T_PASSE2),
+#     ETAT_INIT  = _F(EVOL_THER=RESU_T, INST=60.),  # reprise au dernier instant
+#     ...
+# )
+
+# ==============================================================================
+# 8. MODÈLE MÉCANIQUE
+# ==============================================================================
+
+MO_M = AFFE_MODELE(
+    MAILLAGE = MA,
+    AFFE = _F(
+        TOUT         = 'OUI',
+        PHENOMENE    = 'MECANIQUE',
+        MODELISATION = '3D',
+    ),
+)
+
+# ==============================================================================
+# 9. MATÉRIAUX MÉCANIQUES (élasto-plasticité + dilatation thermique)
+# ==============================================================================
+#
+#  Toutes les propriétés mécaniques sont aussi fonction de T.
+#  Le coefficient de dilatation ALPHA doit être cohérent avec la T de référence.
+
+# DEFI_FONCTION : courbe tabulée 1D f(T).
+# DEFI_NAPPE   : surface 2D f(T, ε_p) — réservé p.ex. à σ_y(T, vitesse).
+
+# Module de Young E(T) [Pa]
+YOUNG = DEFI_FONCTION(
+    NOM_PARA    = 'TEMP',
+    PROL_DROITE = 'CONSTANT',
+    PROL_GAUCHE = 'CONSTANT',
+    VALE        = (
+        20.,   210.e9,
+        200.,  195.e9,
+        400.,  175.e9,
+        600.,  140.e9,
+        800.,   90.e9,
+        1200.,  10.e9,
+        1500.,   1.e9,
+    ),
+)
+
+# Coefficient de Poisson ν(T) [-]
+NU = DEFI_FONCTION(
+    NOM_PARA    = 'TEMP',
+    PROL_DROITE = 'CONSTANT',
+    PROL_GAUCHE = 'CONSTANT',
+    VALE        = (
+        20.,   0.30,
+        600.,  0.33,
+        1200., 0.45,
+        1500., 0.49,
+    ),
+)
+
+# Coefficient de dilatation thermique α(T) [1/°C]  — sécant par rapport à T_REF
+T_REF = 20.     # [°C]  température de référence (pas de déformation libre)
+ALPHA = DEFI_FONCTION(
+    NOM_PARA    = 'TEMP',
+    PROL_DROITE = 'CONSTANT',
+    PROL_GAUCHE = 'CONSTANT',
+    VALE        = (
+        20.,   12.e-6,
+        200.,  13.e-6,
+        400.,  14.5e-6,
+        600.,  16.e-6,
+        800.,  17.e-6,
+        1200., 18.e-6,
+    ),
+)
+
+# Limite d'élasticité σ_y(T) [Pa]
+SY = DEFI_FONCTION(
+    NOM_PARA    = 'TEMP',
+    PROL_DROITE = 'CONSTANT',
+    PROL_GAUCHE = 'CONSTANT',
+    VALE        = (
+        20.,   350.e6,
+        200.,  300.e6,
+        400.,  240.e6,
+        600.,  150.e6,
+        800.,   50.e6,
+        1200.,   5.e6,
+        1500.,   1.e6,
+    ),
+)
+
+# Module d'écrouissage tangent E_t(T) [Pa]  (linéaire isotrope)
+ET = DEFI_FONCTION(
+    NOM_PARA    = 'TEMP',
+    PROL_DROITE = 'CONSTANT',
+    PROL_GAUCHE = 'CONSTANT',
+    VALE        = (
+        20.,   2000.e6,
+        400.,  1500.e6,
+        800.,   500.e6,
+        1200.,   50.e6,
+    ),
+)
+
+MAT_M = DEFI_MATERIAU(
+    ELAS_FO = _F(
+        E     = YOUNG,
+        NU    = NU,
+        ALPHA = ALPHA,
+        TEMP_DEF_ALPHA = T_REF,
+    ),
+    ECRO_LINE_FO = _F(
+        SY    = SY,
+        D_SIGM_EPSI = ET,       # pente d'écrouissage isotrope linéaire
+    ),
+    # Alternative : loi de Chaboche (écrouissage cinématique + isotrope)
+    # ECRO_CINE_LINE_FO = _F(SY=SY, D_SIGM_EPSI=ET),
+    # Pour une loi de plasticité parfaite (sans écrouissage) :
+    # ECRO_LINE_FO = _F(SY=SY, D_SIGM_EPSI=DEFI_CONSTANTE(VALE=0.)),
+)
+
+# ==============================================================================
+# 10. ACTIVATION DES ÉLÉMENTS — TECHNIQUE MACRO-DÉPÔT
+# ==============================================================================
+#
+#  Principe : les mailles de chaque passe sont présentes dans le maillage dès
+#  le début, mais affectées d'un matériau « inerte » (très souple, quasi nul)
+#  jusqu'à l'instant de dépôt. À l'instant de dépôt, on remplace par le
+#  matériau réel.
+#
+#  Code_Aster propose deux approches :
+#    A) DEFI_MATER_INERTE  → matériau avec E≈0 appliqué aux passes inactives
+#    B) DESACTIVATION / ACTIVATION dans STAT_NON_LINE via EXCIT_GENE ou
+#       via une modification de AFFE_MATERIAU à chaque pas de temps
+#
+#  Approche A (la plus simple) :
+
+MAT_INERTE = DEFI_MATERIAU(
+    ELAS = _F(E=1., NU=0.3),   # E≈0 ou très faible (1 Pa) pour neutraliser
+)
+
+# Au début du calcul : SUBSTRAT réel + toutes les passes inertes
+AFFE_M_PAS1 = AFFE_MATERIAU(
+    MAILLAGE = MA,
+    AFFE = (
+        _F(GROUP_MA='SUBSTRAT', MATER=MAT_M),
+        _F(GROUP_MA='PASSE_1',  MATER=MAT_INERTE),
+        _F(GROUP_MA='PASSE_2',  MATER=MAT_INERTE),
+        # ...
+    ),
+    AFFE_VARC = _F(
+        TOUT       = 'OUI',
+        EVOL       = RESU_T,          # champ thermique source
+        NOM_VARC   = 'TEMP',
+        NOM_CHAM   = 'TEMP',
+        VALE_REF   = T_REF,
+    ),
+)
+
+# Après dépôt de PASSE_1 : on active PASSE_1 avec le matériau réel
+AFFE_M_PAS2 = AFFE_MATERIAU(
+    MAILLAGE = MA,
+    AFFE = (
+        _F(GROUP_MA='SUBSTRAT', MATER=MAT_M),
+        _F(GROUP_MA='PASSE_1',  MATER=MAT_M),      # ← activée
+        _F(GROUP_MA='PASSE_2',  MATER=MAT_INERTE),
+    ),
+    AFFE_VARC = _F(
+        TOUT     = 'OUI',
+        EVOL     = RESU_T,
+        NOM_VARC = 'TEMP',
+        NOM_CHAM = 'TEMP',
+        VALE_REF = T_REF,
+    ),
+)
+
+# ==============================================================================
+# 11. TRANSFERT THERMIQUE → MÉCANIQUE (variable de commande TEMP)
+# ==============================================================================
+#
+#  La variable de commande VARC='TEMP' dans AFFE_MATERIAU injecte le champ
+#  thermique RESU_T dans le calcul mécanique sous forme de déformation libre :
+#    ε_th = α(T) · (T − T_ref)
+#
+#  Ceci est déjà fait dans AFFE_M_PAS1 / AFFE_M_PAS2 via AFFE_VARC (cf. §10).
+#
+#  Si le champ thermique et le modèle mécanique n'ont pas le même maillage,
+#  utiliser PROJ_CHAMP pour projeter RESU_T sur le maillage mécanique.
+
+# RESU_T_PROJ = PROJ_CHAMP(
+#     METHODE       = 'ELEM',
+#     RESULTAT      = RESU_T,
+#     MODELE_1      = MO_T,
+#     MODELE_2      = MO_M,
+#     NOM_CHAM      = 'TEMP',
+#     TOUT_ORDRE    = 'OUI',
+# )
+
+# ==============================================================================
+# 12. CONDITIONS AUX LIMITES MÉCANIQUES
+# ==============================================================================
+
+CHAR_M = AFFE_CHAR_MECA(
+    MODELE = MO_M,
+
+    # Encastrement de la face inférieure
+    DDL_IMPO = (
+        _F(GROUP_NO='ENCASTRE', DX=0., DY=0., DZ=0.),
+    ),
+
+    # Plan de symétrie (si applicable)
+    # _F(GROUP_NO='SYM_XZ', DY=0.),
+)
+
+# ==============================================================================
+# 13. RÉSOLUTION MÉCANIQUE — STAT_NON_LINE
+# ==============================================================================
+#
+#  Même découpage temporel que le calcul thermique pour cohérence.
+#  On relance STAT_NON_LINE pour chaque passe en changeant CHAM_MATER.
+
+L_INST_M = DEFI_LIST_REEL(
+    DEBUT = 0.,
+    INTERVALLE = (
+        _F(JUSQU_A=5.,  NOMBRE=25),   # passes actives (pas plus courts)
+        _F(JUSQU_A=60., NOMBRE=20),   # refroidissement
+    ),
+)
+
+L_ARCH_M = DEFI_LIST_REEL(
+    DEBUT = 0.,
+    INTERVALLE = (
+        _F(JUSQU_A=5.,  NOMBRE=10),
+        _F(JUSQU_A=60., NOMBRE=10),
+    ),
+)
+
+RESU_M = STAT_NON_LINE(
+    MODELE      = MO_M,
+    CHAM_MATER  = AFFE_M_PAS1,      # matériau avec passes inertes
+    EXCIT       = _F(CHARGE=CHAR_M),
+    COMPORTEMENT = _F(
+        RELATION    = 'VMIS_ISOT_LINE',   # Von Mises + écrouissage isotrope linéaire
+        DEFORMATION = 'PETIT',             # ou 'GDEF_LOG' pour grandes déformations
+        TOUT        = 'OUI',
+    ),
+    # Alternatives de loi de comportement :
+    # RELATION='ELAS'                 → élasticité linéaire (référence)
+    # RELATION='VMIS_ISOT_TRAC'       → courbe de traction tabulée
+    # RELATION='VMIS_CINE_LINE'       → écrouissage cinématique linéaire
+    # RELATION='VMIS_ISOT_LINE'       → écrouissage isotrope linéaire  ← recommandé
+    # RELATION='NORTON'               → fluage (transitoire chaud)
+    INCREMENT   = _F(LIST_INST=L_INST_M),
+    # Pas d'ETAT_INIT → départ vierge (ou ETAT_INIT=_F(EVOL_NOLI=RESU_M, INST=t) pour reprise)
+    NEWTON      = _F(
+        REAC_ITER     = 1,             # recalcul de la tangente à chaque itération
+        MATRICE       = 'TANGENTE',
+    ),
+    CONVERGENCE = _F(
+        RESI_GLOB_RELA = 1.e-6,
+        ITER_GLOB_MAXI = 30,
+    ),
+    ARCHIVAGE   = _F(LIST_INST=L_ARCH_M),
+)
+
+# Reprise mécanique pour la passe suivante :
+# RESU_M = STAT_NON_LINE(
+#     reuse      = RESU_M,
+#     MODELE     = MO_M,
+#     CHAM_MATER = AFFE_M_PAS2,          # PASSE_1 activée
+#     EXCIT      = _F(CHARGE=CHAR_M),
+#     COMPORTEMENT = _F(RELATION='VMIS_ISOT_LINE', TOUT='OUI'),
+#     INCREMENT  = _F(LIST_INST=L_INST_M_PAS2),
+#     ETAT_INIT  = _F(EVOL_NOLI=RESU_M, INST=60.),  # reprise
+#     ...
+# )
+
+# ==============================================================================
+# 14. POST-TRAITEMENT & EXPORT
+# ==============================================================================
+
+# --- Calcul de champs dérivés (contraintes, déformations, critères) -----------
+RESU_M = CALC_CHAMP(
+    reuse       = RESU_M,
+    RESULTAT    = RESU_M,
+    CONTRAINTE  = ('SIGM_NOEU',),      # contraintes aux nœuds
+    DEFORMATION = ('EPSI_NOEU',        # déformations totales
+                   'EPSP_NOEU',),      # déformations plastiques
+    CRITERES    = ('SIEQ_NOEU',),      # Von Mises, Tresca, σ1/σ2/σ3
+    # SIEQ_NOEU expose : VMIS, TRESCA, PRIN_1, PRIN_2, PRIN_3, VMIS_SG
+)
+
+RESU_T = CALC_CHAMP(
+    reuse       = RESU_T,
+    RESULTAT    = RESU_T,
+    THERMIQUE   = ('FLUX_NOEU',),      # flux thermique nodal
+)
+
+# --- Export résultats MED (ParaVis / Salome) ----------------------------------
+IMPR_RESU(
+    FORMAT = 'MED',
+    UNITE  = 80,
+    RESU   = (
+        _F(RESULTAT  = RESU_T,
+           NOM_CHAM  = ('TEMP', 'FLUX_NOEU'),
+           TOUT_ORDRE = 'OUI'),
+        _F(RESULTAT  = RESU_M,
+           NOM_CHAM  = ('DEPL', 'SIGM_NOEU', 'EPSP_NOEU', 'SIEQ_NOEU'),
+           TOUT_ORDRE = 'OUI'),
+    ),
+)
+
+# --- Export résultats texte (.resu) -------------------------------------------
+IMPR_RESU(
+    FORMAT = 'RESULTAT',
+    UNITE  = 8,
+    RESU   = (
+        _F(RESULTAT  = RESU_T,
+           NOM_CHAM  = 'TEMP',
+           INST      = 60.,              # dernier instant (refroidissement)
+           GROUP_NO  = 'SURF_EXT'),
+        _F(RESULTAT  = RESU_M,
+           NOM_CHAM  = ('DEPL', 'SIGM_NOEU'),
+           INST      = 60.,
+           GROUP_NO  = 'SURF_EXT'),
+    ),
+)
+
+# --- Extrema de Von Mises et température → CSV --------------------------------
+TAB_VM = POST_RELEVE_T(
+    ACTION = _F(
+        OPERATION  = 'EXTREMA',
+        INTITULE   = 'Von_Mises_max',
+        RESULTAT   = RESU_M,
+        NOM_CHAM   = 'SIEQ_NOEU',
+        NOM_CMP    = ('VMIS',),
+        TOUT_ORDRE = 'OUI',
+    ),
+)
+IMPR_TABLE(TABLE=TAB_VM, FORMAT='TABLEAU', UNITE=38, SEPARATEUR=';')
+
+TAB_T = POST_RELEVE_T(
+    ACTION = _F(
+        OPERATION  = 'EXTREMA',
+        INTITULE   = 'Temp_max',
+        RESULTAT   = RESU_T,
+        NOM_CHAM   = 'TEMP',
+        NOM_CMP    = ('TEMP',),
+        TOUT_ORDRE = 'OUI',
+    ),
+)
+IMPR_TABLE(TABLE=TAB_T, FORMAT='TABLEAU', UNITE=38, SEPARATEUR=';')
+
+# --- Extraction en un point / groupe de nœuds ---------------------------------
+TAB_SURF = POST_RELEVE_T(
+    ACTION = _F(
+        OPERATION  = 'EXTRACTION',
+        INTITULE   = 'depl_surface',
+        RESULTAT   = RESU_M,
+        NOM_CHAM   = 'DEPL',
+        GROUP_NO   = 'SURF_EXT',
+        NOM_CMP    = ('DX', 'DY', 'DZ'),
+        TOUT_ORDRE = 'OUI',
+    ),
+)
+IMPR_TABLE(TABLE=TAB_SURF, FORMAT='TABLEAU', UNITE=38, SEPARATEUR=';')
+
+# ==============================================================================
+# RÉFÉRENCE RAPIDE — CHAMPS DISPONIBLES APRÈS CALC_CHAMP
+# ==============================================================================
+#
+#  Thermique (RESU_T)
+#    TEMP       – température nodale                [°C]
+#    FLUX_NOEU  – flux thermique nodal (FX, FY, FZ) [W/m²]
+#
+#  Mécanique (RESU_M)
+#    DEPL       – déplacements (DX, DY, DZ)         [m]
+#    SIGM_NOEU  – contraintes nodales (Sxx…Syz)      [Pa]
+#    SIEF_ELGA  – contraintes pts de Gauss           [Pa]
+#    EPSI_NOEU  – déformations totales               [-]
+#    EPSP_NOEU  – déformations plastiques            [-]
+#    VARI_NOEU  – variables internes                 (dépend du modèle)
+#    REAC_NODA  – réactions nodales (DX, DY, DZ)     [N]
+#
+#  Critères (SIEQ_NOEU)
+#    VMIS       – contrainte équivalente Von Mises   [Pa]
+#    TRESCA     – contrainte de Tresca               [Pa]
+#    PRIN_1/2/3 – contraintes principales σ1≥σ2≥σ3  [Pa]
+#    VMIS_SG    – Von Mises avec signe (Sxx+Syy+Szz) [Pa]
+#
+# ==============================================================================
+# RÉFÉRENCE RAPIDE — LOIS DE COMPORTEMENT MÉCANIQUE
+# ==============================================================================
+#
+#  RELATION              Écrouissage  Utilisation typique
+#  ──────────────────────────────────────────────────────────────────────────
+#  ELAS                  –            Référence élastique
+#  VMIS_ISOT_LINE        isotrope lin. Écrouissage simple, rapide
+#  VMIS_ISOT_TRAC        isotrope tab. Courbe σ-ε expérimentale
+#  VMIS_CINE_LINE        cinématique   Chargements cycliques (Bauschinger)
+#  VISCOCHAB             isot.+cine.   Viscoplasticité Chaboche
+#  NORTON                –             Fluage secondaire (loi puissance)
+#  META_LEMA_ANI         métallurgique Transformations de phase (acier)
+#  ──────────────────────────────────────────────────────────────────────────
+
+# ==============================================================================
+# 15. COMPARAISON CLASSIQUE vs MACRO-DÉPÔT — BOUCLES PARAMÉTRIQUES
+# ==============================================================================
+#
+#  Objectif : mesurer l'écart entre la méthode classique (tous les éléments
+#  actifs dès le début) et la méthode macro-dépôt (activation progressive)
+#  pour plusieurs jeux de paramètres procédé (puissance, rendement, vitesse).
+#
+#  Structure :
+#    ① Définir les listes de paramètres à balayer
+#    ② Pour chaque jeu : lancer les deux calculs (classique + macro-dépôt)
+#    ③ Extraire les champs d'intérêt en numpy via getField
+#    ④ Calculer les métriques d'erreur (L1, L2, L∞, RMSE, Biais)
+#    ⑤ Exporter en CSV (append) pour post-traitement dans comparecsv_v3.py
+#
+#  Note : les commandes Code_Aster (THER_NON_LINE, STAT_NON_LINE…) sont des
+#  fonctions Python ordinaires — elles s'appellent dans des boucles.
+# ==============================================================================
+
+import numpy as np
+import os
+import csv
+import math
+
+# ── Métriques d'erreur (issues de extract_result.comm) ───────────────────────
+
+def erreur_L1(a, r):
+    """Erreur L1 relative [%] : Σ|a−r| / Σ|r|"""
+    return 100. * np.sum(np.abs(a - r)) / np.sum(np.abs(r))
+
+def erreur_L2(a, r):
+    """Erreur L2 relative [%] : ‖a−r‖ / ‖r‖"""
+    return 100. * np.linalg.norm(a - r) / np.linalg.norm(r)
+
+def erreur_Linf(a, r):
+    """Erreur L∞ relative [%] : max|a−r| / max|r|"""
+    return 100. * np.max(np.abs(a - r)) / np.max(np.abs(r))
+
+def rmse(a, r):
+    return float(np.sqrt(np.mean((a - r) ** 2)))
+
+def biais(a, r):
+    return float(np.mean(a - r))
+
+def von_mises(sig):
+    sxx, syy, szz = sig[:, 0], sig[:, 1], sig[:, 2]
+    sxy, sxz, syz = sig[:, 3], sig[:, 4], sig[:, 5]
+    return np.sqrt(0.5 * (
+        (sxx - syy)**2 + (syy - szz)**2 + (szz - sxx)**2
+        + 6 * (sxy**2 + sxz**2 + syz**2)
+    ))
+
+def extraire_champs(resu_m, resu_t):
+    """Retourne (sig, dep, temp, vm) au dernier instant."""
+    params_m = resu_m.getAccessParameters()
+    num_m    = int(params_m['NUME_ORDRE'][-1])
+    params_t = resu_t.getAccessParameters()
+    num_t    = int(params_t['NUME_ORDRE'][-1])
+    sig  = np.array(resu_m.getField('SIGM_NOEU', num_m).getValues()).reshape(-1, 6)
+    dep  = np.array(resu_m.getField('DEPL',      num_m).getValues()).reshape(-1, 3)
+    temp = np.array(resu_t.getField('TEMP',      num_t).getValues())
+    vm   = von_mises(sig)
+    return sig, dep, temp, vm
+
+def rapport_erreur(csv_writer, label_methode, param_nom, param_val, champs_md, champs_ref):
+    """Calcule toutes les métriques et écrit une ligne CSV par grandeur."""
+    sig_md,  dep_md,  temp_md,  vm_md  = champs_md
+    sig_ref, dep_ref, temp_ref, vm_ref = champs_ref
+
+    grandeurs = {
+        'Von Mises [MPa]' : (vm_md,         vm_ref),
+        'DX [mm]'         : (dep_md[:, 0],  dep_ref[:, 0]),
+        'DY [mm]'         : (dep_md[:, 1],  dep_ref[:, 1]),
+        'DZ [mm]'         : (dep_md[:, 2],  dep_ref[:, 2]),
+        'TEMP [C]'        : (temp_md,        temp_ref),
+        'Sxx [MPa]'       : (sig_md[:, 0],  sig_ref[:, 0]),
+        'Syy [MPa]'       : (sig_md[:, 1],  sig_ref[:, 1]),
+        'Szz [MPa]'       : (sig_md[:, 2],  sig_ref[:, 2]),
+    }
+    for label, (a, r) in grandeurs.items():
+        ligne = (f"  {label_methode:<14s} | {param_nom}={param_val:<8} | "
+                 f"{label:<18s} | L2={erreur_L2(a,r):5.2f}% | "
+                 f"Linf={erreur_Linf(a,r):5.2f}% | RMSE={rmse(a,r):.3e}")
+        print(ligne)
+        csv_writer.writerow([
+            label_methode, param_nom, param_val, label,
+            f"{erreur_L2(a,r):.4f}",
+            f"{erreur_Linf(a,r):.4f}",
+            f"{erreur_L1(a,r):.4f}",
+            f"{rmse(a,r):.6e}",
+            f"{biais(a,r):+.6e}",
+        ])
+
+# ── Configuration de l'export ─────────────────────────────────────────────────
+
+SCRATCH  = os.environ.get('SCRATCH', '/tmp')
+JOB_ID   = os.environ.get('SLURM_JOB_ID', 'local')
+OUT_DIR  = os.path.join(SCRATCH, f'comparaison_{JOB_ID}')
+os.makedirs(OUT_DIR, exist_ok=True)
+CSV_PATH = os.path.join(OUT_DIR, 'comparaison_classique_vs_depot.csv')
+
+with open(CSV_PATH, 'w', newline='') as f:
+    csv.writer(f).writerow([
+        'METHODE', 'PARAM', 'VALEUR', 'GRANDEUR',
+        'L2%', 'Linf%', 'L1%', 'RMSE', 'Biais'
+    ])
+
+# ── Paramètres à balayer ──────────────────────────────────────────────────────
+#
+#  Chaque dict définit un axe d'étude indépendant.
+#  On peut les combiner en produit cartésien (itertools.product) ou
+#  les balayer séparément (one-at-a-time).
+
+ETUDES = [
+    ('puissance', [2000., 3000., 4000., 5000.]),   # P [W]
+    ('rendement', [0.65, 0.75, 0.80, 0.85]),        # η [-]
+    ('vitesse',   [3.e-3, 5.e-3, 8.e-3, 12.e-3]),  # V_s [m/s]
+]
+
+# ── Fonctions utilitaires pour reconstruire source et matériaux ───────────────
+
+def creer_source(p_arc, eta, v_soud, mo_t, groupe='PASSE_1'):
+    """Recrée AFFE_CHAR_THER avec les nouveaux paramètres procédé."""
+    q    = p_arc * eta
+    c1f_ = (6.*math.sqrt(3.)*FF_G*q) / (math.pi*math.sqrt(math.pi)*A_G*B_G*CF_G)
+    c1r_ = (6.*math.sqrt(3.)*FR_G*q) / (math.pi*math.sqrt(math.pi)*A_G*B_G*CR_G)
+    def src(x, y, z, t):
+        xi = x - v_soud * t
+        r2 = -3.*y**2/A_G**2 - 3.*z**2/B_G**2
+        if xi >= 0.:
+            return c1f_ * math.exp(r2 - 3.*xi**2/CF_G**2)
+        return c1r_ * math.exp(r2 - 3.*xi**2/CR_G**2)
+    return AFFE_CHAR_THER(
+        MODELE     = mo_t,
+        SOURCE     = _F(GROUP_MA=groupe,
+                        SOUR=Formule(NOM_PARA=('X','Y','Z','INST'), VALE='src(X,Y,Z,INST)')),
+        CONVECTION = _F(GROUP_MA='SURF_EXT', COEF_H=H_CONV, TEMP_EXT=T_AMB),
+        RAYONNEMENT= _F(GROUP_MA='SURF_EXT', SIGMA=5.67e-8, EPSILON=EMISS, TEMP_EXT=T_AMB),
+    )
+
+def creer_affe_mat_classique(resu_t_loc):
+    """Méthode classique : tous les éléments actifs dès le début."""
+    return AFFE_MATERIAU(
+        MAILLAGE = MA,
+        AFFE     = _F(TOUT='OUI', MATER=MAT_M),
+        AFFE_VARC = _F(TOUT='OUI', NOM_VARC='TEMP', NOM_CHAM='TEMP',
+                       EVOL=resu_t_loc, VALE_REF=T_REF),
+    )
+
+def creer_affe_mat_depot(resu_t_loc):
+    """Méthode macro-dépôt : PASSE_1 inerte jusqu'au dépôt."""
+    return AFFE_MATERIAU(
+        MAILLAGE = MA,
+        AFFE = (
+            _F(GROUP_MA='SUBSTRAT', MATER=MAT_M),
+            _F(GROUP_MA='PASSE_1',  MATER=MAT_INERTE),
+        ),
+        AFFE_VARC = _F(TOUT='OUI', NOM_VARC='TEMP', NOM_CHAM='TEMP',
+                       EVOL=resu_t_loc, VALE_REF=T_REF),
+    )
+
+def lancer_thermique(char_t_loc):
+    return THER_NON_LINE(
+        MODELE      = MO_T,
+        CHAM_MATER  = AFFE_T,
+        EXCIT       = _F(CHARGE=char_t_loc),
+        INCREMENT   = _F(LIST_INST=L_INST_T),
+        ETAT_INIT   = _F(CHAM_NO=TEMP_INI),
+        CONVERGENCE = _F(RESI_GLOB_RELA=1.e-6, ITER_GLOB_MAXI=30),
+        NEWTON      = _F(REAC_ITER=1),
+    )
+
+def lancer_mecanique(affe_m_loc):
+    return STAT_NON_LINE(
+        MODELE       = MO_M,
+        CHAM_MATER   = affe_m_loc,
+        EXCIT        = _F(CHARGE=CHAR_M),
+        COMPORTEMENT = _F(RELATION='VMIS_ISOT_LINE', DEFORMATION='PETIT', TOUT='OUI'),
+        INCREMENT    = _F(LIST_INST=L_INST_M),
+        NEWTON       = _F(REAC_ITER=1, MATRICE='TANGENTE'),
+        CONVERGENCE  = _F(RESI_GLOB_RELA=1.e-6, ITER_GLOB_MAXI=30),
+        ARCHIVAGE    = _F(LIST_INST=L_ARCH_M),
+    )
+
+def post_champs(resu_m_loc):
+    return CALC_CHAMP(
+        reuse       = resu_m_loc,
+        RESULTAT    = resu_m_loc,
+        CONTRAINTE  = ('SIGM_NOEU',),
+        CRITERES    = ('SIEQ_NOEU',),
+    )
+
+# ── Boucles paramétriques ─────────────────────────────────────────────────────
+
+with open(CSV_PATH, 'a', newline='') as f_csv:
+    writer = csv.writer(f_csv)
+
+    for param_nom, valeurs in ETUDES:
+        print(f"\n{'='*70}")
+        print(f"  Étude : {param_nom}  —  {len(valeurs)} valeurs")
+        print(f"{'='*70}")
+
+        for val in valeurs:
+            # ── Mise à jour du paramètre procédé ──────────────────────────────
+            if param_nom == 'puissance':
+                p_loc, eta_loc, v_loc = val, ETA, V_SOUD
+            elif param_nom == 'rendement':
+                p_loc, eta_loc, v_loc = P, val, V_SOUD
+            else:  # vitesse
+                p_loc, eta_loc, v_loc = P, ETA, val
+
+            print(f"\n  → {param_nom} = {val}  (P={p_loc} W, η={eta_loc}, V={v_loc} m/s)")
+
+            # ── Source de chaleur avec les nouveaux paramètres ────────────────
+            CHAR_T_LOC = creer_source(p_loc, eta_loc, v_loc, MO_T)
+
+            # ── Calcul thermique (commun aux deux méthodes) ───────────────────
+            RESU_T_LOC = lancer_thermique(CHAR_T_LOC)
+
+            # ── Méthode CLASSIQUE ─────────────────────────────────────────────
+            AFFE_M_CL  = creer_affe_mat_classique(RESU_T_LOC)
+            RESU_M_CL  = lancer_mecanique(AFFE_M_CL)
+            RESU_M_CL  = post_champs(RESU_M_CL)
+
+            # ── Méthode MACRO-DÉPÔT ───────────────────────────────────────────
+            AFFE_M_MD  = creer_affe_mat_depot(RESU_T_LOC)
+            RESU_M_MD  = lancer_mecanique(AFFE_M_MD)
+            RESU_M_MD  = post_champs(RESU_M_MD)
+
+            # ── Extraction des champs au dernier instant ──────────────────────
+            champs_cl = extraire_champs(RESU_M_CL, RESU_T_LOC)
+            champs_md = extraire_champs(RESU_M_MD, RESU_T_LOC)
+
+            # ── Comparaison macro-dépôt vs classique (ref = classique) ────────
+            rapport_erreur(writer, 'macro-depot', param_nom, val, champs_md, champs_cl)
+
+            # ── Nettoyage mémoire (optionnel, évite l'accumulation) ───────────
+            DETRUIRE(NOM=(RESU_T_LOC, RESU_M_CL, RESU_M_MD,
+                          CHAR_T_LOC, AFFE_M_CL, AFFE_M_MD))
+
+print(f"\nRésultats exportés : {CSV_PATH}")
+print("Visualisation : python Outil_annexes/comparecsv_v3.py " + CSV_PATH)
+
+# ==============================================================================
+# FORMAT DU CSV PRODUIT
+# ==============================================================================
+#
+#  METHODE       PARAM       VALEUR  GRANDEUR          L2%     Linf%   L1%     RMSE       Biais
+#  macro-depot   puissance   2000.0  Von Mises [MPa]   1.23    2.45    0.98    1.500e-02  -3.2e-03
+#  macro-depot   puissance   2000.0  DX [mm]           0.45    0.67    0.34    2.100e-04  -1.2e-05
+#  macro-depot   puissance   3000.0  Von Mises [MPa]   0.87    1.92    0.71    1.200e-02  -2.1e-03
+#  ...
+#
+#  Post-traitement rapide avec pandas :
+#
+#  import pandas as pd
+#  import matplotlib.pyplot as plt
+#  df = pd.read_csv('comparaison_classique_vs_depot.csv')
+#  pivot = df[df.GRANDEUR=='Von Mises [MPa]'].pivot(
+#              index='VALEUR', columns='PARAM', values='L2%')
+#  pivot.plot(marker='o', title='Erreur L2 Von Mises vs paramètre procédé')
+#  plt.show()
+# ==============================================================================
+
+FIN()

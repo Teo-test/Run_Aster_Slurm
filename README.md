@@ -10,9 +10,8 @@ Ensemble d'outils pour soumettre des calculs **Code_Aster** via **Slurm** et exp
 |---|---|
 | Soumettre un calcul | `bash run_aster.sh` |
 | Soumettre un calcul (CLI) | `bash run_aster.sh [OPTIONS] DOSSIER/` |
-| Analyser un `.resu` | `bash Outil_annexes/parse_resu.sh` |
-| Analyser un `.resu` (CLI) | `bash Outil_annexes/parse_resu.sh [OPTIONS] FICHIER.resu` |
 | Comparer des CSV | `python Outil_annexes/comparecsv_v3.py [fichiers.csv ...]` |
+| Fusionner des Excel/CSV | `python excel_merger.py [DOSSIER/]` |
 | Extraire des graphes PPTX | `python Outil_annexes/pptx_chart_extractor_v2.py [fichier.pptx]` |
 
 > **Navigation commune aux outils Python** :
@@ -194,78 +193,35 @@ scancel <JOB_ID>    # annule — rapatriement automatique déclenché
 
 ---
 
-## `parse_resu.sh` — Analyse des fichiers `.resu` Code_Aster
+## `excel_merger.py` — Fusion de fichiers Excel / CSV
 
-Navigation par flèches identique à `run_aster.sh`. Aucune dépendance externe (bash + awk).
+Consolide tous les fichiers Excel et CSV d'un dossier en un seul classeur Excel.
+
+### Installation
+
+```bash
+pip install pandas openpyxl
+```
 
 ### Lancement
 
 ```bash
-# Mode interactif (détection auto des .resu dans le dossier courant)
-bash Outil_annexes/parse_resu.sh
+# Dossier courant
+python excel_merger.py
 
-# Sur un fichier ou un dossier précis
-bash Outil_annexes/parse_resu.sh mon_etude/run_12345/calcul.resu
-bash Outil_annexes/parse_resu.sh mon_etude/run_12345/
+# Dossier explicite
+python excel_merger.py mon_etude/run_12345/
+
+# Fichier de sortie personnalisé
+python excel_merger.py mon_etude/ -o synthese.xlsx
 ```
 
-### Mode interactif — étapes
+### Fonctionnement
 
-1. **Sélection du fichier** `.resu` (menu flèches si plusieurs trouvés, profondeur 3)
-2. **Scan automatique** → tableau récapitulatif des blocs : champ, numéro d'ordre, instant, localisation
-3. **Sélection des blocs** à traiter (cases à cocher)
-4. **Action** → Export CSV / Statistiques / Affichage terminal / Les deux
-5. **Dossier de sortie** (si export CSV)
-
-### Mode CLI
-
-| Option | Description |
-|---|---|
-| `-f, --field NOM`  | Filtrer sur un champ (`DEPL`, `SIEF_ELNO`, `EQUI_ELNO`…) |
-| `-o, --ordre N`    | Filtrer sur un numéro d'ordre (0 = tous) |
-| `-a, --all`        | Exporter tous les blocs en CSV |
-| `--stats`          | Afficher statistiques min/max/moy (sans CSV) |
-| `--csv`            | Forcer l'export CSV (un fichier par bloc) |
-| `-O, --outdir DIR` | Dossier de sortie (défaut : même dossier que le `.resu`) |
-| `-q, --quiet`      | Sortie minimale |
-
-### Exemples CLI
-
-```bash
-# Export CSV du champ DEPL (tous les instants)
-bash Outil_annexes/parse_resu.sh -f DEPL --csv calcul.resu
-
-# Statistiques sur les contraintes
-bash Outil_annexes/parse_resu.sh --stats -f SIEF_ELNO calcul.resu
-
-# Tout exporter vers un dossier dédié
-bash Outil_annexes/parse_resu.sh --all -O ./resultats/ mon_etude/run_12345/
-
-# Un ordre précis
-bash Outil_annexes/parse_resu.sh -f DEPL -o 3 --csv calcul.resu
-```
-
-### Format des fichiers produits
-
-Un CSV par bloc sélectionné, nommé `CHAMP_ordN_instX.csv` :
-
-```
-NOEUD,DX,DY,DZ
-N1,0.000000E+00,0.000000E+00,0.000000E+00
-N2,5.461820E-05,9.945110E-07,-6.324510E-07
-```
-
-| Localisation | Colonnes identifiant |
-|---|---|
-| `NOEU` (nœuds) | `NOEUD` |
-| `ELNO` (nœuds par élément) | `MAILLE, NOEUD` |
-| `ELGA` (points de Gauss) | `MAILLE, POINT` |
-
-### Limites connues (v1.0)
-
-- Blocs avec **wrapping de colonnes** (>6 composantes) : seul le premier groupe de colonnes est extrait
-- Format **`IMPR_TABLE`** (colonnes libres) : non pris en charge
-- Blocs **`ELGA SOUS_POINT`** : support partiel
+- Détecte tous les `.xlsx`, `.xls`, `.csv`, `.tsv` dans le dossier
+- Crée une feuille par fichier (et par onglet pour les `.xlsx` multi-feuilles)
+- En-têtes formatés (fond bleu, texte blanc), lignes alternées, colonnes auto-dimensionnées, filtres automatiques
+- Génère une feuille index avec la liste des fichiers traités
 
 ---
 
@@ -398,6 +354,16 @@ bash Outil_annexes/run_aster_light.sh -B mon_etude_thermo/latest    mon_etude_me
 |---|---|
 | `-B, --base CHEMIN` | Dossier de base pour **POURSUITE** (doit contenir `glob.*` et `pick.*`) |
 | `-h, --help` | Affiche l'aide |
+
+---
+
+## Cheatsheets & références
+
+| Fichier | Contenu |
+|---|---|
+| `test/extract_result.comm` | Extraction et comparaison de résultats Code_Aster : API Python (`getField`, `getAccessParameters`), calculs mécaniques (Von Mises, contraintes principales, Tresca), métriques d'erreur (L1/L2/L∞/RMSE), export CSV/TXT. À inclure ou adapter dans un `.comm`. |
+| `Outil_annexes/extract_result_cheatsheet.py` | Version enrichie de la même cheatsheet, utilisable hors `.comm` : lecture de `.resu` texte, lecture de `.csv` IMPR_TABLE, lecture `.med` binaire (medcoupling / h5py), tracés matplotlib, pattern d'étude paramétrique complet. |
+| `Outil_annexes/pandas_cheatsheet.py` | Référence pandas : lecture CSV (encodage, séparateur, chunks), nettoyage, filtrage, groupby, pivot, visualisation, export. |
 
 ---
 

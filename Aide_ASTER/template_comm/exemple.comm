@@ -1,0 +1,66 @@
+DEBUT()
+
+# Import de l'utilitaire
+exec(open('/chemin/work/utils_comparaison.py').read())
+
+# Chemins
+SCRATCH      = os.environ.get('SCRATCH', '/tmp')
+JOB_ID       = os.environ.get('SLURM_JOB_ID', 'local')
+OUT_DIR      = os.path.join(SCRATCH, f'resultats_{JOB_ID}')
+PATH_MAILLAGE = '/chemin/work/maillage.med'
+PATH_REF      = '/chemin/scratch/calcul_ref/resu_ref.med'
+liste_params  = [0.5, 1.0, 1.5, 2.0]
+PATH_MD_LIST  = [f'/chemin/scratch/calcul_md_{p}/resu_md.med' for p in liste_params]
+
+# Maillage
+Debug.fichiers(PATH_MAILLAGE, PATH_REF, PATH_MD_LIST)
+DEFI_FICHIER(ACTION='ASSOCIER', UNITE=20, FICHIER=PATH_MAILLAGE, TYPE='BINARY')
+MA = LIRE_MAILLAGE(UNITE=20, FORMAT='MED')
+DEFI_FICHIER(ACTION='LIBERER', UNITE=20)
+coords = Debug.maillage(MA)
+MO = AFFE_MODELE(MAILLAGE=MA, AFFE=_F(TOUT='OUI', PHENOMENE='MECANIQUE', MODELISATION='3D'))
+
+# Reference
+DEFI_FICHIER(ACTION='ASSOCIER', UNITE=21, FICHIER=PATH_REF, TYPE='BINARY')
+resu_ref = LIRE_RESU(TYPE_RESU='EVOL_NOLI', FORMAT='MED', MODELE=MO, UNITE=21,
+    FORMAT_MED=(_F(NOM_CHAM='DEPL', NOM_CHAM_MED='DEPL'),
+                _F(NOM_CHAM='SIGM_NOEU', NOM_CHAM_MED='SIGM_NOEU')), TOUT_ORDRE='OUI')
+DEFI_FICHIER(ACTION='LIBERER', UNITE=21)
+sig_ref, dep_ref, vm_ref = extraire_champs(resu_ref)
+Debug.champ(sig_ref, dep_ref, 'REFERENCE')
+I_NOEUD = int(np.argmax(vm_ref))
+
+# Boucle
+txt_path, csv_path = init_export(OUT_DIR)
+Rapport.entete("COMPARAISON MACRO-DEPOT vs REFERENCE")
+
+for valeur_param, path_md in zip(liste_params, PATH_MD_LIST):
+    DEFI_FICHIER(ACTION='ASSOCIER', UNITE=22, FICHIER=path_md, TYPE='BINARY')
+    resu_md = LIRE_RESU(TYPE_RESU='EVOL_NOLI', FORMAT='MED', MODELE=MO, UNITE=22,
+        FORMAT_MED=(_F(NOM_CHAM='DEPL', NOM_CHAM_MED='DEPL'),
+                    _F(NOM_CHAM='SIGM_NOEU', NOM_CHAM_MED='SIGM_NOEU')), TOUT_ORDRE='OUI')
+    DEFI_FICHIER(ACTION='LIBERER', UNITE=22)
+
+    sig_md, dep_md, vm_md = extraire_champs(resu_md)
+    Debug.coherence(sig_ref, sig_md, dep_ref, dep_md)
+    Debug.noeud(I_NOEUD, coords, dep_ref, dep_md, sig_ref, sig_md, vm_ref, vm_md)
+    Rapport.parametre(valeur_param)
+
+    grandeurs = {
+        'Sxx [Mpa]'       : (sig_md[:,0], sig_ref[:,0,0]),
+        'Syy [Mpa]'       : (sig_md[:,1], sig_ref[:,1,1]),
+        'Szz [Mpa]'       : (sig_md[:,2], sig_ref[:,2,2]),
+        'Sxy [Mpa]'       : (sig_md[:,3], sig_ref[:,0,1]),
+        'Sxz [Mpa]'       : (sig_md[:,4], sig_ref[:,0,2]),
+        'Syz [Mpa]'       : (sig_md[:,5], sig_ref[:,1,2]),
+        'Von Mises [Pa]' : (vm_md,       vm_ref),
+        'DX [m]'         : (dep_md[:,0], dep_ref[:,0]),
+        'DY [m]'         : (dep_md[:,1], dep_ref[:,1]),
+        'DZ [m]'         : (dep_md[:,2], dep_ref[:,2]),
+    }
+    ecrire_export(txt_path, csv_path, valeur_param, grandeurs)
+
+Rapport.pied_de_page(len(liste_params))
+print(c.cyan + f"Fichiers exportes dans : {OUT_DIR}" + c.reset)
+
+FIN()

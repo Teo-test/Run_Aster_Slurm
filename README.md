@@ -4,15 +4,50 @@ Ensemble d'outils pour soumettre des calculs **Code_Aster** via **Slurm** et exp
 
 ---
 
+## Structure du dépôt
+
+```text
+Run_Aster_Slurm/
+├── Aide_ASTER/
+│   ├── run_aster/                    ← soumission Code_Aster via Slurm
+│   │   ├── run_aster.sh              ← point d'entrée (orchestrateur)
+│   │   ├── run_aster_old.sh          ← ancienne version monolithique (archivée)
+│   │   ├── conf/
+│   │   │   └── config.sh             ← ✏️  SEUL fichier à éditer
+│   │   └── lib/
+│   │       ├── ui.sh                 ← couleurs, menus, barre de progression
+│   │       ├── utils.sh              ← utilitaires fichiers
+│   │       ├── comm.sh               ← analyse et validation du .comm
+│   │       ├── export.sh             ← génération du .export
+│   │       ├── slurm.sh              ← soumission sbatch
+│   │       └── exec.sh               ← phase calcul (nœud de calcul)
+│   └── template_comm/
+│       ├── exemple.comm              ← modèle de .comm minimal
+│       ├── extract_result.comm       ← cheatsheet extraction de résultats
+│       ├── thermo_meca_soudage.comm  ← cheatsheet soudage (macro-dépôt)
+│       └── utils_comparaison.py      ← utilitaires calculs (Von Mises, erreurs)
+└── Outil_annexes/
+    ├── comparecsv_v3.py              ← comparateur CSV interactif (flèches)
+    ├── comparecsv.py                 ← idem, ancienne interface (numéros)
+    ├── excel_merger.py               ← fusion Excel / CSV
+    ├── pptx_chart_extractor_v2.py    ← extracteur graphes PPTX (flèches)
+    ├── pptx_chart_extractor.py       ← idem, ancienne interface (numéros)
+    ├── pandas_cheatsheet.py          ← référence pandas
+    └── run_aster_light.sh            ← version debug sans Slurm
+```
+
+---
+
 ## Démarrage rapide
 
 | Outil | Commande de lancement |
 |---|---|
-| Soumettre un calcul | `bash run_aster.sh` |
-| Soumettre un calcul (CLI) | `bash run_aster.sh [OPTIONS] DOSSIER/` |
+| Soumettre un calcul (wizard) | `bash Aide_ASTER/run_aster/run_aster.sh` |
+| Soumettre un calcul (CLI) | `bash Aide_ASTER/run_aster/run_aster.sh [OPTIONS] DOSSIER/` |
 | Comparer des CSV | `python Outil_annexes/comparecsv_v3.py [fichiers.csv ...]` |
-| Fusionner des Excel/CSV | `python excel_merger.py [DOSSIER/]` |
+| Fusionner des Excel/CSV | `python Outil_annexes/excel_merger.py [DOSSIER/]` |
 | Extraire des graphes PPTX | `python Outil_annexes/pptx_chart_extractor_v2.py [fichier.pptx]` |
+| Debug sans Slurm | `bash Outil_annexes/run_aster_light.sh DOSSIER/` |
 
 > **Navigation commune aux outils Python** :
 > - `↑↓` pour naviguer
@@ -24,30 +59,53 @@ Ensemble d'outils pour soumettre des calculs **Code_Aster** via **Slurm** et exp
 
 ## `run_aster.sh` — Soumission de calculs Code_Aster
 
+### Architecture modulaire
+
+Le script est découpé en bibliothèques indépendantes :
+
+```text
+run_aster/
+├── run_aster.sh     ← orchestrateur (~150 lignes), ne pas modifier
+├── conf/config.sh   ← ✏️  configuration calculateur + presets Slurm
+└── lib/
+    ├── ui.sh        ← couleurs, menus interactifs, barre de progression (6 étapes)
+    ├── utils.sh     ← _find_first(), _count_files()
+    ├── comm.sh      ← parse le .comm, détecte les UNITE nécessaires
+    ├── export.sh    ← valide TYPE/UNITE, génère le .export
+    ├── slurm.sh     ← construit et exécute sbatch
+    └── exec.sh      ← phase 2 : chargement Code_Aster, calcul, rapatriement
+```
+
 ### Prérequis
 
 - Slurm (`sbatch`, `squeue`, `scancel`)
 - Code_Aster installé sous `ASTER_ROOT` ou accessible via un module Lmod
 - Scratch partagé entre nœud login et nœuds de calcul
 
-### Configuration (en tête du script)
+### Configuration (`conf/config.sh`)
+
+**Seul fichier à modifier** pour adapter le script à votre calculateur :
 
 ```bash
 ASTER_ROOT="${ASTER_ROOT:-/opt/code_aster}"  # chemin vers Code_Aster
 ASTER_MODULE="${ASTER_MODULE:-}"             # module Lmod (laisser vide si non utilisé)
 SCRATCH_BASE="${SCRATCH_BASE:-/scratch}"     # scratch partagé login ↔ calcul
+
+# Presets Slurm
+declare -A PRESET_MEM=( [court]="2G"  [moyen]="20G"  [long]="50G" )
+declare -A PRESET_TIME=([court]="05:00:00" [moyen]="03-00:00:00" [long]="30-00:00:00")
 ```
 
-Ces variables peuvent être surchargées depuis le shell avant d'appeler le script :
+Ces variables peuvent aussi être surchargées depuis le shell :
 ```bash
 export ASTER_ROOT=/logiciels/code_aster/17.1
-bash run_aster.sh mon_etude/
+bash Aide_ASTER/run_aster/run_aster.sh mon_etude/
 ```
 
 ### Mode interactif (sans argument)
 
 ```bash
-bash run_aster.sh
+bash Aide_ASTER/run_aster/run_aster.sh
 ```
 
 Lance un wizard en 4 étapes avec navigation par flèches :
@@ -59,7 +117,7 @@ Lance un wizard en 4 étapes avec navigation par flèches :
 ### Mode CLI (avec arguments)
 
 ```bash
-bash run_aster.sh [OPTIONS] [DOSSIER_ETUDE]
+bash Aide_ASTER/run_aster/run_aster.sh [OPTIONS] [DOSSIER_ETUDE]
 ```
 
 #### Fichiers d'entrée
@@ -99,12 +157,12 @@ Les options passées **après** `-P` surchargent le preset : `-P moyen -t 8`
 -R "type:unite,type:unite,..."   # ex: -R "rmed:81,csv:38"
 ```
 
-| Unité | Type   | Extension | Description |
-|:-----:|--------|-----------|-------------|
-| 6     | `mess` | `.mess`   | Log d'exécution |
-| 8     | `resu` | `.resu`   | Résultats texte |
-| 38    | `csv`  | `.csv`    | Tableau (IMPR_TABLE) |
-| 80    | `rmed` | `.rmed`    | Résultats MED (ParaVis) |
+| Unité | Type   | Extension | Description                   |
+|:-----:|--------|-----------|-------------------------------|
+| 6     | `mess` | `.mess`   | Log d'exécution               |
+| 8     | `resu` | `.resu`   | Résultats texte               |
+| 38    | `csv`  | `.csv`    | Tableau (IMPR_TABLE)          |
+| 80    | `rmed` | `.rmed`   | Résultats MED (ParaVis)       |
 | 81+   | `rmed` | `.med`    | Résultats MED supplémentaires |
 
 Dans le `.comm` : `IMPR_RESU(UNITE=81, ...)` / `IMPR_TABLE(UNITE=38, ...)`
@@ -125,28 +183,28 @@ Dans le `.comm` : `IMPR_RESU(UNITE=81, ...)` / `IMPR_TABLE(UNITE=38, ...)`
 
 ```bash
 # Mode interactif
-bash run_aster.sh
+bash Aide_ASTER/run_aster/run_aster.sh
 
 # Dossier explicite avec preset
-bash run_aster.sh -P moyen mon_etude/
+bash Aide_ASTER/run_aster/run_aster.sh -P moyen mon_etude/
 
 # Preset surchargé
-bash run_aster.sh -P moyen -t 8 -m 16G mon_etude/
+bash Aide_ASTER/run_aster/run_aster.sh -P moyen -t 8 -m 16G mon_etude/
 
 # Résultats supplémentaires
-bash run_aster.sh -P moyen -R "rmed:81,csv:38" mon_etude/
+bash Aide_ASTER/run_aster/run_aster.sh -P moyen -R "rmed:81,csv:38" mon_etude/
 
 # Calcul en poursuite (POURSUITE) avec base explicite
-bash run_aster.sh -P moyen -B mon_etude_thermo/run_12345 mon_etude_meca/
+bash Aide_ASTER/run_aster/run_aster.sh -P moyen -B mon_etude_thermo/run_12345 mon_etude_meca/
 
 # Suivre le job en temps réel
-bash run_aster.sh -P court -f mon_etude/
+bash Aide_ASTER/run_aster/run_aster.sh -P court -f mon_etude/
 
 # Récupérer uniquement le job ID (pour scripts)
-JOB=$(bash run_aster.sh -q mon_etude/)
+JOB=$(bash Aide_ASTER/run_aster/run_aster.sh -q mon_etude/)
 
 # Vérifier sans lancer
-bash run_aster.sh --dry-run -P moyen mon_etude/
+bash Aide_ASTER/run_aster/run_aster.sh --dry-run -P moyen mon_etude/
 ```
 
 ### Fonctionnement interne
@@ -167,7 +225,7 @@ bash run_aster.sh mon_etude/            sbatch relance CE MÊME script
 
 Un `trap SIGTERM/EXIT` garantit que les résultats sont **toujours rapatriés**, même en cas de `scancel` ou de timeout.
 
-### Structure des fichiers
+### Structure des fichiers générés
 
 ```
 $SCRATCH_BASE/$USER/<etude>_<ts>_<pid>/   ← scratch (calcul)
@@ -191,6 +249,25 @@ ls mon_etude/latest/
 scancel <JOB_ID>    # annule — rapatriement automatique déclenché
 ```
 
+### Étude paramétrique
+
+Pour soumettre plusieurs variantes automatiquement :
+
+```bash
+#!/usr/bin/env bash
+FLUX_VALUES=(5e6 8e6 12e6)
+TAUX_VALUES=(0.5 1.0 2.0)
+
+for flux in "${FLUX_VALUES[@]}"; do
+  for taux in "${TAUX_VALUES[@]}"; do
+    CASE="MD_F${flux}_T${taux}"
+    cp -r cases/template "cases/${CASE}"
+    sed -i "s/__FLUX__/${flux}/g; s/__TAUX__/${taux}/g" "cases/${CASE}/macro_depot.comm"
+    bash Aide_ASTER/run_aster/run_aster.sh -P moyen "cases/${CASE}/"
+  done
+done
+```
+
 ---
 
 ## `excel_merger.py` — Fusion de fichiers Excel / CSV
@@ -207,13 +284,13 @@ pip install pandas openpyxl
 
 ```bash
 # Dossier courant
-python excel_merger.py
+python Outil_annexes/excel_merger.py
 
 # Dossier explicite
-python excel_merger.py mon_etude/run_12345/
+python Outil_annexes/excel_merger.py mon_etude/run_12345/
 
 # Fichier de sortie personnalisé
-python excel_merger.py mon_etude/ -o synthese.xlsx
+python Outil_annexes/excel_merger.py mon_etude/ -o synthese.xlsx
 ```
 
 ### Fonctionnement
@@ -337,7 +414,7 @@ python Outil_annexes/pptx_chart_extractor_v2.py presentation.pptx -o resultats/
 
 ## `run_aster_light.sh` — Version minimale de debug
 
-Script simplifié pour diagnostiquer des problèmes de configuration. Affiche l'environnement complet (PATH, modules, exécutable trouvé, contenu du `.export`) avant de lancer le calcul.
+Script simplifié pour diagnostiquer des problèmes de configuration. Affiche l'environnement complet (PATH, modules, exécutable trouvé, contenu du `.export`) avant de lancer le calcul. Tourne directement sur le nœud login, sans Slurm.
 
 ### Lancement
 
@@ -361,8 +438,10 @@ bash Outil_annexes/run_aster_light.sh -B mon_etude_thermo/latest    mon_etude_me
 
 | Fichier | Contenu |
 |---|---|
-| `test/extract_result.comm` | Extraction et comparaison de résultats Code_Aster : API Python (`getField`, `getAccessParameters`), calculs mécaniques (Von Mises, contraintes principales, Tresca), métriques d'erreur (L1/L2/L∞/RMSE), export CSV/TXT. À inclure ou adapter dans un `.comm`. |
-| `Outil_annexes/extract_result_cheatsheet.py` | Version enrichie de la même cheatsheet, utilisable hors `.comm` : lecture de `.resu` texte, lecture de `.csv` IMPR_TABLE, lecture `.med` binaire (medcoupling / h5py), tracés matplotlib, pattern d'étude paramétrique complet. |
+| `Aide_ASTER/template_comm/extract_result.comm` | Extraction et comparaison de résultats Code_Aster : API Python (`getField`, `getAccessParameters`), calculs mécaniques (Von Mises, contraintes principales, Tresca), métriques d'erreur (L1/L2/L∞/RMSE), export CSV/TXT. À inclure ou adapter dans un `.comm`. |
+| `Aide_ASTER/template_comm/thermo_meca_soudage.comm` | Cheatsheet complète pour simulation de soudage : source de chaleur Goldak (double ellipsoïde), analyse thermique (convection, rayonnement), analyse mécanique (activation d'éléments, dilatation thermique, élasto-plastique), méthode multi-passes macro-dépôt. |
+| `Aide_ASTER/template_comm/utils_comparaison.py` | Utilitaires calculs pour fichiers `.comm` : Von Mises (numpy vectorisé), métriques d'erreur (L1, L2, L∞, RMSE, biais), codes couleur terminal. Import via `exec(open('/chemin/utils_comparaison.py').read())`. |
+| `Aide_ASTER/template_comm/exemple.comm` | Modèle de `.comm` minimal : chargement maillage, calcul de référence, boucle paramétrique avec `utils_comparaison.py`. |
 | `Outil_annexes/pandas_cheatsheet.py` | Référence pandas : lecture CSV (encodage, séparateur, chunks), nettoyage, filtrage, groupby, pivot, visualisation, export. |
 
 ---
